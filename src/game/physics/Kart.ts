@@ -41,10 +41,25 @@ export function kartForward(heading: number): THREE.Vector3 {
   return new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
 }
 
+// Driver's right hand when facing `heading` (up x forward, matching TrackBuilder's convention).
+export function kartRight(heading: number): THREE.Vector3 {
+  return new THREE.Vector3(Math.cos(heading), 0, -Math.sin(heading));
+}
+
 function moveToward(current: number, target: number, maxDelta: number): number {
   const delta = target - current;
   if (Math.abs(delta) <= maxDelta) return target;
   return current + Math.sign(delta) * maxDelta;
+}
+
+const SLIP_DECAY_SECONDS = 0.3;
+
+export function driftTier(charge: number): number {
+  let tier = 0;
+  for (let i = 0; i < TUNING.driftTierTimes.length; i++) {
+    if (charge >= TUNING.driftTierTimes[i]) tier = i + 1;
+  }
+  return tier;
 }
 
 // §3.2 steps 1-2 and 4 (longitudinal, steering, integrate). Drift (step 3) and
@@ -86,7 +101,39 @@ export function stepKart(kart: KartState, control: ControlState, dt: number, off
   const lowSpeedAuthority = clamp(Math.abs(kart.speed) / 3, 0, 1);
   const yawRate = baseYawRate * lowSpeedAuthority;
 
+  // 3. Drift state machine
+  if (kart.drift.phase === 'none') {
+    if (control.drift && Math.abs(kart.speed) >= T.driftMinSpeed && Math.abs(kart.steerActual) > 0.25) {
+      kart.drift.phase = 'active';
+      kart.drift.dir = (Math.sign(kart.steerActual) || 1) as -1 | 1;
+      kart.drift.charge = 0;
+    }
+  } else if (Math.abs(kart.speed) < T.driftMinSpeed) {
+    // Cancelled: charge discarded, no boost.
+    kart.drift.phase = 'none';
+    kart.drift.charge = 0;
+  } else if (!control.drift) {
+    // Released: award a boost if a tier was reached.
+    const tier = driftTier(kart.drift.charge);
+    if (tier >= 1) kart.boostTimer = T.boostDurations[tier - 1];
+    kart.drift.phase = 'none';
+    kart.drift.charge = 0;
+  } else {
+    kart.drift.charge += dt;
+  }
+
+  let angularVelocity: number;
+  if (kart.drift.phase === 'active') {
+    const dir = kart.drift.dir;
+    angularVelocity = yawRate * T.driftYawBonus * dir * (1 + kart.steerActual * dir * T.driftCounterRange);
+    kart.velLateral = -dir * T.driftLateralSlip;
+  } else {
+    angularVelocity = yawRate * kart.steerActual * Math.sign(kart.speed);
+    kart.velLateral = moveToward(kart.velLateral, 0, (T.driftLateralSlip / SLIP_DECAY_SECONDS) * dt);
+  }
+
   // 4. Integrate (steering flips automatically when reversing via sign(speed))
-  kart.heading += yawRate * kart.steerActual * Math.sign(kart.speed) * dt;
+  kart.heading += angularVelocity * dt;
   kart.pos.addScaledVector(kartForward(kart.heading), kart.speed * dt);
+  kart.pos.addScaledVector(kartRight(kart.heading), kart.velLateral * dt);
 }

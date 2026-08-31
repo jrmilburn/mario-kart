@@ -9,6 +9,8 @@ export class Hud {
   private qrCanvas: HTMLCanvasElement;
   private peerEl: HTMLDivElement;
   private kbBadge: HTMLDivElement;
+  private driftBar: HTMLDivElement;
+  private driftFill: HTMLDivElement;
 
   constructor(container: HTMLElement) {
     this.root = document.createElement('div');
@@ -28,6 +30,15 @@ export class Hud {
       'font-size:13px; font-weight:700; background:#34495e; display:none;';
     this.kbBadge.textContent = 'KB';
     this.root.appendChild(this.kbBadge);
+
+    this.driftBar = document.createElement('div');
+    this.driftBar.style.cssText =
+      'position:absolute; left:50%; bottom:24px; transform:translateX(-50%); width:180px; height:12px; ' +
+      'border-radius:6px; background:rgba(0,0,0,0.4); overflow:hidden; display:none;';
+    this.driftFill = document.createElement('div');
+    this.driftFill.style.cssText = 'height:100%; width:0%; background:#3498db; transition:background 0.1s;';
+    this.driftBar.appendChild(this.driftFill);
+    this.root.appendChild(this.driftBar);
 
     this.lobbyPanel = document.createElement('div');
     this.lobbyPanel.style.cssText =
@@ -79,6 +90,15 @@ export class Hud {
 
   setKeyboardActive(active: boolean) {
     this.kbBadge.style.display = active ? 'block' : 'none';
+  }
+
+  // tier: 0 (charging, below tier 1) .. 3. progress: 0..1 toward the max tier threshold.
+  setDriftCharge(active: boolean, tier: number, progress: number) {
+    this.driftBar.style.display = active ? 'block' : 'none';
+    if (!active) return;
+    const colors = ['#7f8c8d', '#3498db', '#e67e22', '#9b59b6']; // gray, blue, orange, purple
+    this.driftFill.style.background = colors[Math.min(tier, colors.length - 1)];
+    this.driftFill.style.width = `${Math.round(Math.min(Math.max(progress, 0), 1) * 100)}%`;
   }
 
   hideLobby() {

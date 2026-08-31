@@ -4,13 +4,14 @@ import { InputSource } from './input/InputSource';
 import { Hud } from './ui/Hud';
 import { Diagnostics } from './ui/Diagnostics';
 import { startLoop } from './core/loop';
-import { createKart, stepKart } from './physics/Kart';
+import { createKart, driftTier, stepKart } from './physics/Kart';
 import { resolveWallCollision } from './physics/collision';
-import { buildGround, buildLights, buildKart } from './render/SceneBuilder';
+import { buildGround, buildLights, buildKart, updateKartVisual } from './render/SceneBuilder';
 import { FollowCamera } from './render/FollowCamera';
 import { buildTrack } from './track/TrackBuilder';
 import { TrackQuery } from './track/TrackQuery';
 import { ROAD_HALF } from './track/trackData';
+import { TUNING } from './tuning';
 
 const app = document.getElementById('app')!;
 
@@ -88,11 +89,13 @@ startLoop(
     const renderDt = Math.min((now - lastRenderTime) / 1000, 0.1);
     lastRenderTime = now;
 
-    kartVisual.group.position.copy(kart.pos);
-    kartVisual.group.rotation.y = kart.heading;
-    kartVisual.shadow.position.set(kart.pos.x, 0.02, kart.pos.z);
+    updateKartVisual(kartVisual, kart, renderDt);
 
     followCamera.update(kart, renderDt);
+
+    const driftActive = kart.drift.phase === 'active';
+    const maxTierTime = TUNING.driftTierTimes[TUNING.driftTierTimes.length - 1];
+    hud.setDriftCharge(driftActive, driftTier(kart.drift.charge), kart.drift.charge / maxTierTime);
 
     const diag = inputSource.diagnostics();
     hud.setKeyboardActive(diag.source === 'keyboard');
