@@ -5,16 +5,16 @@ export interface KartVisual {
   shadow: THREE.Mesh; // flat blob shadow; position-only follow, never rotates
 }
 
+// One large flat plane beneath everything (§3.1) for far-field coverage beyond
+// the modeled grass ribbon around the track.
 export function buildGround(scene: THREE.Scene) {
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(400, 400),
-    new THREE.MeshLambertMaterial({ color: 0x6b8f4e }),
+    new THREE.PlaneGeometry(1000, 1000),
+    new THREE.MeshLambertMaterial({ color: 0x3d6b32 }),
   );
   ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.05;
   scene.add(ground);
-
-  const grid = new THREE.GridHelper(400, 80, 0x2f4f2f, 0x3f5f3f);
-  scene.add(grid);
 }
 
 export function buildLights(scene: THREE.Scene) {

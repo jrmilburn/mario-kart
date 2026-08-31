@@ -49,7 +49,9 @@ function moveToward(current: number, target: number, maxDelta: number): number {
 
 // §3.2 steps 1-2 and 4 (longitudinal, steering, integrate). Drift (step 3) and
 // spin-out (step 5) land in Phase 4 / Phase 10.
-export function stepKart(kart: KartState, control: ControlState, dt: number) {
+// `offRoad` (from TrackQuery, |lateral| > ROAD_HALF) applies the grass speed cap;
+// boost overrides the cap so a mushroom powers through grass.
+export function stepKart(kart: KartState, control: ControlState, dt: number, offRoad = false) {
   const T = TUNING;
 
   // 1. Longitudinal
@@ -68,6 +70,13 @@ export function stepKart(kart: KartState, control: ControlState, dt: number) {
     }
   } else {
     kart.speed = moveToward(kart.speed, 0, T.coastDecel * dt);
+  }
+
+  if (offRoad && kart.boostTimer <= 0) {
+    const cap = T.topSpeed * T.offRoadSpeedCap;
+    if (Math.abs(kart.speed) > cap) {
+      kart.speed = moveToward(kart.speed, Math.sign(kart.speed) * cap, T.offRoadDecel * dt);
+    }
   }
 
   // 2. Steering

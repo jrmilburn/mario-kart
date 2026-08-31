@@ -5,8 +5,12 @@ import { Hud } from './ui/Hud';
 import { Diagnostics } from './ui/Diagnostics';
 import { startLoop } from './core/loop';
 import { createKart, stepKart } from './physics/Kart';
+import { resolveWallCollision } from './physics/collision';
 import { buildGround, buildLights, buildKart } from './render/SceneBuilder';
 import { FollowCamera } from './render/FollowCamera';
+import { buildTrack } from './track/TrackBuilder';
+import { TrackQuery } from './track/TrackQuery';
+import { ROAD_HALF } from './track/trackData';
 
 const app = document.getElementById('app')!;
 
@@ -24,7 +28,13 @@ app.appendChild(renderer.domElement);
 buildLights(scene);
 buildGround(scene);
 
-const kart = createKart(new THREE.Vector3(0, 0, 0));
+const track = buildTrack();
+scene.add(track.group);
+const trackQuery = new TrackQuery(track.samples, track.totalLength);
+
+const startSample = track.samples[track.checkpoints[0]];
+const startHeading = Math.atan2(startSample.forward.x, startSample.forward.z);
+const kart = createKart(startSample.pos.clone(), startHeading);
 const kartVisual = buildKart(0xff6b35);
 scene.add(kartVisual.group);
 scene.add(kartVisual.shadow);
@@ -66,7 +76,10 @@ let lastRenderTime = performance.now();
 startLoop(
   (dt) => {
     const control = inputSource.sample();
-    stepKart(kart, control, dt);
+    const preSample = trackQuery.nearestSample(kart.pos);
+    const offRoad = Math.abs(preSample.lateral) > ROAD_HALF;
+    stepKart(kart, control, dt, offRoad);
+    resolveWallCollision(kart, trackQuery);
   },
   () => {
     diagnostics.tickFrame();
