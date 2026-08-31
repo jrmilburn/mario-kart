@@ -8,6 +8,7 @@ export class Hud {
   private codeEl: HTMLDivElement;
   private qrCanvas: HTMLCanvasElement;
   private peerEl: HTMLDivElement;
+  private kbBadge: HTMLDivElement;
 
   constructor(container: HTMLElement) {
     this.root = document.createElement('div');
@@ -20,6 +21,13 @@ export class Hud {
       'position:absolute; top:12px; right:12px; padding:6px 14px; border-radius:999px; font-size:13px; background:#f39c12; pointer-events:auto;';
     this.pill.textContent = 'connecting…';
     this.root.appendChild(this.pill);
+
+    this.kbBadge = document.createElement('div');
+    this.kbBadge.style.cssText =
+      'position:absolute; top:12px; right:110px; padding:6px 12px; border-radius:999px; ' +
+      'font-size:13px; font-weight:700; background:#34495e; display:none;';
+    this.kbBadge.textContent = 'KB';
+    this.root.appendChild(this.kbBadge);
 
     this.lobbyPanel = document.createElement('div');
     this.lobbyPanel.style.cssText =
@@ -67,6 +75,10 @@ export class Hud {
   setPeerConnected(connected: boolean) {
     this.peerEl.textContent = connected ? 'Phone connected ✓' : 'Waiting for phone…';
     this.peerEl.style.background = connected ? '#27ae60' : '#c0392b';
+  }
+
+  setKeyboardActive(active: boolean) {
+    this.kbBadge.style.display = active ? 'block' : 'none';
   }
 
   hideLobby() {

@@ -12,6 +12,19 @@ const NEUTRAL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0 };
 // Keyboard input stays "active" this long after the last mapped keypress (D12).
 const KEYBOARD_OVERRIDE_MS = 2000;
 
+const THROTTLE_CODES = ['KeyW', 'ArrowUp'];
+const BRAKE_CODES = ['KeyS', 'ArrowDown'];
+const LEFT_CODES = ['KeyA', 'ArrowLeft'];
+const RIGHT_CODES = ['KeyD', 'ArrowRight'];
+const DRIFT_CODES = ['ShiftLeft', 'ShiftRight'];
+const MAPPED_CODES = new Set([
+  ...THROTTLE_CODES,
+  ...BRAKE_CODES,
+  ...LEFT_CODES,
+  ...RIGHT_CODES,
+  ...DRIFT_CODES,
+]);
+
 export interface InputDiagnostics {
   source: 'keyboard' | 'controller' | 'neutral';
   steerMode: SteerMode | null;
@@ -20,14 +33,27 @@ export interface InputDiagnostics {
 }
 
 // Merges controller snapshots (relayed over the network) and keyboard state into
-// a single ControlState sampled once per physics tick. Keyboard listening itself
-// is wired up in Phase 2 via setKeyboardState(); this class only defines the
-// merge/staleness seam so that phase can plug in without touching this logic.
+// a single ControlState sampled once per physics tick. Keyboard always wins for
+// 2s after the last mapped keypress (D12); otherwise the latest fresh controller
+// snapshot is used; otherwise neutral (coast).
 export class InputSource {
   private latestSnapshot: InputSnapshot | null = null;
   private latestReceivedAt = 0;
-  private keyboardState: ControlState | null = null;
-  private keyboardLastActiveAt = 0;
+  private keysDown = new Set<string>();
+  private lastKeyboardActivityAt = -Infinity;
+
+  attachKeyboard() {
+    window.addEventListener('keydown', (e) => {
+      if (!MAPPED_CODES.has(e.code)) return;
+      this.keysDown.add(e.code);
+      this.lastKeyboardActivityAt = performance.now();
+    });
+    window.addEventListener('keyup', (e) => {
+      if (!MAPPED_CODES.has(e.code)) return;
+      this.keysDown.delete(e.code);
+    });
+    window.addEventListener('blur', () => this.keysDown.clear());
+  }
 
   onSnapshot(snapshot: InputSnapshot) {
     // Discard out-of-order/duplicate snapshots, except a seq reset that arrives
@@ -43,14 +69,26 @@ export class InputSource {
     this.latestReceivedAt = performance.now();
   }
 
-  setKeyboardState(state: ControlState | null) {
-    this.keyboardState = state;
-    if (state) this.keyboardLastActiveAt = performance.now();
+  private keyboardControlState(): ControlState {
+    const left = this.keysDown.has(LEFT_CODES[0]) || this.keysDown.has(LEFT_CODES[1]);
+    const right = this.keysDown.has(RIGHT_CODES[0]) || this.keysDown.has(RIGHT_CODES[1]);
+    let steer = 0;
+    if (left && !right) steer = -1;
+    else if (right && !left) steer = 1;
+
+    const throttle = THROTTLE_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
+    const brake = BRAKE_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
+    const drift = DRIFT_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
+    return { steer, throttle: throttle as 0 | 1, brake: brake as 0 | 1, drift: drift as 0 | 1 };
+  }
+
+  private isKeyboardActive(now: number): boolean {
+    return now - this.lastKeyboardActivityAt < KEYBOARD_OVERRIDE_MS;
   }
 
   sample(now: number = performance.now()): ControlState {
-    if (this.keyboardState && now - this.keyboardLastActiveAt < KEYBOARD_OVERRIDE_MS) {
-      return this.keyboardState;
+    if (this.isKeyboardActive(now)) {
+      return this.keyboardControlState();
     }
     if (this.latestSnapshot && now - this.latestReceivedAt < INPUT_STALE_MS) {
       const s = this.latestSnapshot;
@@ -60,8 +98,7 @@ export class InputSource {
   }
 
   diagnostics(now: number = performance.now()): InputDiagnostics {
-    const keyboardActive = !!this.keyboardState && now - this.keyboardLastActiveAt < KEYBOARD_OVERRIDE_MS;
-    if (keyboardActive) {
+    if (this.isKeyboardActive(now)) {
       return { source: 'keyboard', steerMode: null, seq: null, ageMs: null };
     }
     if (this.latestSnapshot && now - this.latestReceivedAt < INPUT_STALE_MS) {
