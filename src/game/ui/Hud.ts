@@ -1,5 +1,6 @@
 import QRCode from 'qrcode';
 import type { ConnectionStatus } from '../net/GameSocket';
+import type { SteerMode } from '../../shared/protocol';
 
 export class Hud {
   private root: HTMLDivElement;
@@ -9,6 +10,7 @@ export class Hud {
   private qrCanvas: HTMLCanvasElement;
   private peerEl: HTMLDivElement;
   private kbBadge: HTMLDivElement;
+  private steerModeBadge: HTMLDivElement;
   private driftBar: HTMLDivElement;
   private driftFill: HTMLDivElement;
   private raceInfo: HTMLDivElement;
@@ -35,6 +37,12 @@ export class Hud {
       'font-size:13px; font-weight:700; background:#34495e; display:none;';
     this.kbBadge.textContent = 'KB';
     this.root.appendChild(this.kbBadge);
+
+    this.steerModeBadge = document.createElement('div');
+    this.steerModeBadge.style.cssText =
+      'position:absolute; top:12px; right:190px; padding:6px 12px; border-radius:999px; ' +
+      'font-size:13px; font-weight:700; background:#2c3e50; display:none;';
+    this.root.appendChild(this.steerModeBadge);
 
     this.driftBar = document.createElement('div');
     this.driftBar.style.cssText =
@@ -128,6 +136,15 @@ export class Hud {
 
   setKeyboardActive(active: boolean) {
     this.kbBadge.style.display = active ? 'block' : 'none';
+  }
+
+  setSteerMode(mode: SteerMode | null) {
+    if (!mode) {
+      this.steerModeBadge.style.display = 'none';
+      return;
+    }
+    this.steerModeBadge.style.display = 'block';
+    this.steerModeBadge.textContent = mode.toUpperCase();
   }
 
   // tier: 0 (charging, below tier 1) .. 3. progress: 0..1 toward the max tier threshold.

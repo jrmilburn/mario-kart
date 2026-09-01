@@ -302,6 +302,7 @@ startLoop(
 
     const diag = inputSource.diagnostics();
     hud.setKeyboardActive(diag.source === 'keyboard');
+    hud.setSteerMode(diag.source === 'controller' ? diag.steerMode : null);
     diagnostics.update({
       rttMs: lastRttMs,
       inputAgeMs: diag.ageMs,

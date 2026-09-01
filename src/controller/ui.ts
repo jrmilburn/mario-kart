@@ -1,6 +1,7 @@
 import type { EventName } from '../shared/protocol';
 import { ControllerSocket, getStoredRoomCode, type ConnectionStatus } from './ControllerSocket';
 import { TouchSteering } from './TouchSteering';
+import { WakeLock } from './WakeLock';
 
 const STATUS_STYLE: Record<ConnectionStatus, [string, string]> = {
   connecting: ['connecting…', '#f39c12'],
@@ -8,12 +9,12 @@ const STATUS_STYLE: Record<ConnectionStatus, [string, string]> = {
   reconnecting: ['reconnecting…', '#c0392b'],
 };
 
-function makeHoldButton(label: string, color: string) {
+function makeHoldButton(label: string, color: string, extraStyle = '') {
   const btn = document.createElement('button');
   btn.textContent = label;
   btn.style.cssText =
-    `flex:1; height:88px; border-radius:16px; border:none; font-size:16px; font-weight:700; ` +
-    `color:#fff; background:${color}; touch-action:none;`;
+    `border-radius:16px; border:none; font-size:16px; font-weight:700; ` +
+    `color:#fff; background:${color}; touch-action:none; ${extraStyle}`;
   let active = false;
   const setActive = (v: boolean) => {
     active = v;
@@ -50,14 +51,23 @@ export function initControllerUI(root: HTMLElement) {
   title.style.cssText = 'font-size:18px; letter-spacing:2px; font-weight:700;';
   header.appendChild(title);
 
+  const statusGroup = document.createElement('div');
+  statusGroup.style.cssText = 'display:flex; align-items:center; gap:8px;';
+  header.appendChild(statusGroup);
+
+  const rttText = document.createElement('div');
+  rttText.style.cssText = 'font-size:12px; opacity:0.7; font-variant-numeric:tabular-nums;';
+  statusGroup.appendChild(rttText);
+
   const pill = document.createElement('div');
   pill.style.cssText = 'padding:4px 12px; border-radius:999px; font-size:12px; background:#f39c12;';
   pill.textContent = 'connecting…';
-  header.appendChild(pill);
+  statusGroup.appendChild(pill);
 
   const codeEntryPanel = document.createElement('div');
   codeEntryPanel.style.cssText =
-    'display:none; flex-direction:column; align-items:center; justify-content:center; flex:1; gap:12px;';
+    'display:none; flex-direction:column; align-items:center; justify-content:center; flex:1; gap:12px; ' +
+    'background:rgba(255,255,255,0.05); border-radius:20px; padding:24px;';
   wrapper.appendChild(codeEntryPanel);
 
   const codeEntryMsg = document.createElement('div');
@@ -80,22 +90,31 @@ export function initControllerUI(root: HTMLElement) {
     'background:#27ae60; color:#fff;';
   codeEntryPanel.appendChild(joinButton);
 
+  // Thumb-corner layout: BRAKE bottom-left; DRIFT+GO stacked bottom-right (GO
+  // largest, at the very corner where the right thumb naturally rests); the
+  // steering slider spans the full width above the button row.
   const playPanel = document.createElement('div');
   playPanel.style.cssText = 'display:none; flex-direction:column; flex:1; gap:16px; justify-content:flex-end;';
   wrapper.appendChild(playPanel);
 
-  const buttonsRow = document.createElement('div');
-  buttonsRow.style.cssText = 'display:flex; gap:12px; justify-content:space-between;';
-  playPanel.appendChild(buttonsRow);
-
-  const brakeBtn = makeHoldButton('BRAKE', '#c0392b');
-  const driftBtn = makeHoldButton('DRIFT', '#8e44ad');
-  const throttleBtn = makeHoldButton('GO', '#27ae60');
-  buttonsRow.append(brakeBtn.el, driftBtn.el, throttleBtn.el);
-
   const sliderContainer = document.createElement('div');
   playPanel.appendChild(sliderContainer);
   const steering = new TouchSteering(sliderContainer);
+
+  const controlsRow = document.createElement('div');
+  controlsRow.style.cssText = 'display:flex; justify-content:space-between; align-items:flex-end; gap:16px;';
+  playPanel.appendChild(controlsRow);
+
+  const brakeBtn = makeHoldButton('BRAKE', '#c0392b', 'width:120px; height:80px;');
+  controlsRow.appendChild(brakeBtn.el);
+
+  const rightCluster = document.createElement('div');
+  rightCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px; align-items:stretch;';
+  controlsRow.appendChild(rightCluster);
+
+  const driftBtn = makeHoldButton('DRIFT', '#8e44ad', 'width:140px; height:64px;');
+  const throttleBtn = makeHoldButton('GO', '#27ae60', 'width:140px; height:96px; font-size:20px;');
+  rightCluster.append(driftBtn.el, throttleBtn.el);
 
   const raceOverlay = document.createElement('div');
   raceOverlay.style.cssText =
@@ -120,6 +139,29 @@ export function initControllerUI(root: HTMLElement) {
     'font-size:20px; font-weight:800; padding:18px 36px; border-radius:16px; border:none; ' +
     'background:#2980b9; color:#fff;';
   raceOverlay.appendChild(restartBtn);
+
+  // Portrait blocker: touch controls are landscape-only (§3.7).
+  const portraitBlocker = document.createElement('div');
+  portraitBlocker.style.cssText =
+    'position:fixed; inset:0; display:none; flex-direction:column; align-items:center; ' +
+    'justify-content:center; gap:16px; background:#0b0b0b; z-index:20; text-align:center; padding:0 32px;';
+  portraitBlocker.innerHTML =
+    '<div style="font-size:48px;">📱↻</div><div style="font-size:18px;">Rotate your phone to landscape</div>';
+  root.appendChild(portraitBlocker);
+
+  function updateOrientation() {
+    const portrait = window.innerHeight > window.innerWidth;
+    portraitBlocker.style.display = portrait ? 'flex' : 'none';
+  }
+  window.addEventListener('resize', updateOrientation);
+  window.addEventListener('orientationchange', updateOrientation);
+  updateOrientation();
+  const orientationLock = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+  orientationLock.lock?.('landscape').catch(() => {
+    /* not supported outside fullscreen/installed contexts — the CSS blocker is the real fallback */
+  });
+
+  const wakeLock = new WakeLock();
 
   let activeSocket: ControllerSocket | null = null;
   startBtn.addEventListener('click', () => activeSocket?.sendEvent('start'));
@@ -189,6 +231,7 @@ export function initControllerUI(root: HTMLElement) {
         onJoined: () => {
           showPlay();
           showRaceOverlay('', true, false); // default to the lobby/START state until an event says otherwise
+          wakeLock.start();
         },
         onJoinError: (reason) => {
           showCodeEntry(
@@ -199,6 +242,9 @@ export function initControllerUI(root: HTMLElement) {
         },
         onGameLeft: () => showCodeEntry('Game closed. Enter a new code to reconnect.'),
         onEvent: handleRaceEvent,
+        onRtt: (rttMs) => {
+          rttText.textContent = `${Math.round(rttMs)}ms`;
+        },
       },
     );
   }
