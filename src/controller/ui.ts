@@ -112,6 +112,7 @@ export function initControllerUI(root: HTMLElement) {
 
   const tiltSteering = new TiltSteering();
   let steerMode: 'touch' | 'tilt' = 'touch';
+  let tiltAutoAttempted = false;
 
   const wheelContainer = document.createElement('div');
   wheelContainer.style.cssText = 'display:none; align-items:center; justify-content:center; height:120px;';
@@ -126,15 +127,15 @@ export function initControllerUI(root: HTMLElement) {
   wheelDial.appendChild(wheelSpoke);
 
   const controlsRow = document.createElement('div');
-  controlsRow.style.cssText = 'display:flex; justify-content:space-between; align-items:flex-end; gap:16px;';
+  controlsRow.style.cssText = 'display:flex; justify-content:space-between; gap:16px;';
   playPanel.appendChild(controlsRow);
 
   const leftCluster = document.createElement('div');
-  leftCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px; align-items:stretch;';
+  leftCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px;';
   controlsRow.appendChild(leftCluster);
 
   const rightCluster = document.createElement('div');
-  rightCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px; align-items:stretch;';
+  rightCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px;';
   controlsRow.appendChild(rightCluster);
 
   const itemBtn = makeHoldButton('ITEM', '#f39c12');
@@ -144,32 +145,54 @@ export function initControllerUI(root: HTMLElement) {
 
   // Touch mode: BRAKE bottom-left; DRIFT+GO stacked bottom-right (GO largest,
   // at the corner the right thumb rests on) — steering is the full-width slider.
+  // Fixed pixel sizes here are fine since the slider above already claims most
+  // of the vertical space.
+  //
   // Tilt mode: steering is handled by the wheel, freeing both thumbs for one
   // big button each — DRIFT (left) and GO (right, the primary action) — with
-  // the secondary REVERSE tucked small underneath GO, mirrored by ITEM under DRIFT.
+  // the secondary REVERSE tucked small underneath GO, mirrored by ITEM under
+  // DRIFT. These use flex-grow sizing (not fixed px) so the cluster stretches
+  // to fill the phone's full remaining height edge-to-edge regardless of
+  // screen size, instead of overflowing off the bottom on shorter phones.
   function applyButtonLayoutForMode(mode: 'touch' | 'tilt') {
     if (mode === 'touch') {
+      controlsRow.style.flex = '0 0 auto';
+      controlsRow.style.alignItems = 'flex-end';
+      leftCluster.style.flex = '0 0 auto';
+      rightCluster.style.flex = '0 0 auto';
       leftCluster.append(itemBtn.el, brakeBtn.el);
       rightCluster.append(driftBtn.el, throttleBtn.el);
       brakeBtn.el.textContent = 'BRAKE';
-      setButtonSize(itemBtn.el, 120, 64, 16);
-      setButtonSize(brakeBtn.el, 120, 80, 16);
-      setButtonSize(driftBtn.el, 140, 64, 16);
-      setButtonSize(throttleBtn.el, 140, 96, 20);
+      setFixedButtonSize(itemBtn.el, 120, 64, 16);
+      setFixedButtonSize(brakeBtn.el, 120, 80, 16);
+      setFixedButtonSize(driftBtn.el, 140, 64, 16);
+      setFixedButtonSize(throttleBtn.el, 140, 96, 20);
     } else {
+      controlsRow.style.flex = '1';
+      controlsRow.style.alignItems = 'stretch';
+      leftCluster.style.flex = '1';
+      rightCluster.style.flex = '1';
       leftCluster.append(driftBtn.el, itemBtn.el);
       rightCluster.append(throttleBtn.el, brakeBtn.el);
       brakeBtn.el.textContent = 'REVERSE';
-      setButtonSize(driftBtn.el, 156, 124, 22);
-      setButtonSize(itemBtn.el, 156, 52, 14);
-      setButtonSize(throttleBtn.el, 156, 156, 28);
-      setButtonSize(brakeBtn.el, 156, 52, 14);
+      setFlexButtonSize(driftBtn.el, 5, 26);
+      setFlexButtonSize(itemBtn.el, 2, 16);
+      setFlexButtonSize(throttleBtn.el, 3, 28);
+      setFlexButtonSize(brakeBtn.el, 1, 16);
     }
   }
 
-  function setButtonSize(el: HTMLButtonElement, width: number, height: number, fontSize: number) {
+  function setFixedButtonSize(el: HTMLButtonElement, width: number, height: number, fontSize: number) {
+    el.style.flex = '0 0 auto';
     el.style.width = `${width}px`;
     el.style.height = `${height}px`;
+    el.style.fontSize = `${fontSize}px`;
+  }
+
+  function setFlexButtonSize(el: HTMLButtonElement, flexGrow: number, fontSize: number) {
+    el.style.flex = `${flexGrow} 1 0`;
+    el.style.width = '100%';
+    el.style.height = 'auto';
     el.style.fontSize = `${fontSize}px`;
   }
 
@@ -207,6 +230,14 @@ export function initControllerUI(root: HTMLElement) {
     toast.style.display = 'block';
     if (toastTimer !== null) window.clearTimeout(toastTimer);
     if (!retry) toastTimer = window.setTimeout(() => (toast.style.display = 'none'), 3500);
+  }
+
+  function hideToast() {
+    if (toastTimer !== null) {
+      window.clearTimeout(toastTimer);
+      toastTimer = null;
+    }
+    toast.style.display = 'none';
   }
 
   const calibrationPanel = document.createElement('div');
@@ -275,6 +306,7 @@ export function initControllerUI(root: HTMLElement) {
       showToast('Tilt unavailable — using touch.', enableTilt);
       return;
     }
+    hideToast();
     tiltSteering.attach();
     openCalibration();
   }
@@ -429,6 +461,12 @@ export function initControllerUI(root: HTMLElement) {
           showPlay();
           showRaceOverlay('', true, false); // default to the lobby/START state until an event says otherwise
           wakeLock.start();
+          // Tilt is the default steering mode; attempt it once per session,
+          // falling back to touch (with a one-tap retry toast) if unavailable.
+          if (!tiltAutoAttempted) {
+            tiltAutoAttempted = true;
+            enableTilt();
+          }
         },
         onJoinError: (reason) => {
           showCodeEntry(

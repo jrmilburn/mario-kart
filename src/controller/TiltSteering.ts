@@ -78,7 +78,9 @@ export class TiltSteering {
 
   private handleEvent = (e: DeviceOrientationEvent) => {
     if (e.alpha === null || e.beta === null || e.gamma === null) return;
-    let wheelAngle = computeWheelAngle(e.alpha, e.beta, e.gamma);
+    // PLAN-DEVIATION: negated — computeWheelAngle's raw sign steered opposite
+    // to the physical tilt direction (user-reported).
+    let wheelAngle = -computeWheelAngle(e.alpha, e.beta, e.gamma);
 
     // Flip sign between the two landscape orientations so left is always left.
     const orientationAngle = screen.orientation?.angle ?? 0;
