@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { CONTROL_POINTS, ROAD_HALF, GRASS_HALF, CHECKPOINT_COUNT, SURFACE_ZONES, type SurfaceZone } from './trackData';
 import { buildAsphaltTexture, buildGrassTexture, tryLoadTextureOverride } from '../render/textures';
+// §v3 Track A: prop planting has to agree with the ground heightfield's own
+// clamp, so the two constants live in Environment and are imported here rather
+// than duplicated (no runtime cycle: Environment's only TrackBuilder import is
+// `import type`).
+import { GROUND_SINK, TERRAIN_CLAMP_RADIUS } from '../render/Environment';
 // Value imports from TrackQuery/LapTracker are safe here (no runtime cycle):
 // TrackQuery's only import of this module is `import type`, and LapTracker's
 // is too — both erased at compile time.
@@ -27,7 +32,15 @@ const RAW_SAMPLE_COUNT = 2000;
 const STRIPE_WIDTH = 0.4;
 const WALL_HEIGHT = 1.2;
 const TEXTURE_V_SCALE = 8; // meters of arc length per texture repeat, longitudinally (§Phase 4 item 1)
-const SKIRT_BOTTOM_Y = -2.5; // §Phase 5 elevation review fix #2: below Environment.ts's flat ground plane (y=-0.05)
+// §v3 Track A: was an absolute SKIRT_BOTTOM_Y = -2.5 (chosen to sit under
+// Environment.ts's old flat y=-0.05 ground plane). Environment's ground is now
+// a heightfield that follows the track's own elevation, so an absolute bottom
+// is simultaneously too short on the +8m esses crest (skirt ends miles above
+// the terrain) and pointlessly long in the -1.8m double-apex dip. Measuring
+// the drop *down from the local grass edge* instead keeps the seam sealed at
+// every elevation. It only has to out-reach GROUND_SINK (0.25m) plus whatever
+// the coarse 6m terrain cells undershoot by; 3m is generous headroom.
+const SKIRT_DEPTH = 3;
 
 const UP = new THREE.Vector3(0, 1, 0);
 const MAX_SAMPLE_GRADE = 0.12; // §Phase 5 item 1: dev-time budget for adjacent-sample |dy/ds|
@@ -298,12 +311,13 @@ function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
 }
 
 // §Phase 5 elevation review fix #2: on graded (hilly) sections, the grass
-// ribbon's outer edge now sits above/below Environment.ts's flat far-field
-// ground plane (y=-0.05), exposing a floating-cliff gap underneath on hills.
-// A vertical "skirt" strip from the grass outer edge straight down to a
-// constant y hides that gap. No UVs needed (flat vertex color), so this
-// follows buildWallMeshes's %n indexing (no seam-duplicate ring) rather than
-// the road/grass builders' n+1-ring pattern.
+// ribbon's outer edge sits above the far-field ground, exposing a
+// floating-cliff gap underneath on hills. A vertical "skirt" strip hanging
+// off the grass outer edge hides that gap. No UVs needed (flat vertex color),
+// so this follows buildWallMeshes's %n indexing (no seam-duplicate ring)
+// rather than the road/grass builders' n+1-ring pattern.
+// §v3 Track A: the drop is now relative to the local grass edge height
+// (SKIRT_DEPTH below it) rather than down to an absolute y — see SKIRT_DEPTH.
 const skirtColor = new THREE.Color(0x3f5c34); // earthy brown-green, darker than the grass ribbon's 0x5cb85c
 
 function buildGroundSkirtMesh(samples: TrackSample[]): THREE.Mesh {
@@ -316,7 +330,7 @@ function buildGroundSkirtMesh(samples: TrackSample[]): THREE.Mesh {
     for (let i = 0; i < n; i++) {
       const { pos, right } = samples[i];
       const top = pos.clone().addScaledVector(right, side * GRASS_HALF);
-      positions.push(top.x, top.y, top.z, top.x, SKIRT_BOTTOM_Y, top.z);
+      positions.push(top.x, top.y, top.z, top.x, top.y - SKIRT_DEPTH, top.z);
       colors.push(skirtColor.r, skirtColor.g, skirtColor.b, skirtColor.r, skirtColor.g, skirtColor.b);
     }
     for (let i = 0; i < n; i++) {
@@ -408,6 +422,30 @@ function buildStartFinish(sample0: TrackSample): THREE.Group {
 // of draw calls regardless of how many are placed.
 const START_CLEARANCE_SAMPLES = 10; // keep props away from the start arch
 
+// §v3 Track A review finding #2: trackside props used to be planted at their
+// own centerline sample's height (`sample.pos.y + a local offset`). The ground
+// heightfield can't be that high anywhere another part of the ribbon passes
+// within TERRAIN_CLAMP_RADIUS at a lower elevation -- on the inside of the
+// graded esses the circuit doubles back ~16m away and ~2m lower, and the
+// terrain there is (correctly) held below the *lower* ribbon, so trees, warp
+// pipes and grandstands hung up to 2.2m in the air. Planting them on exactly
+// the floor Environment clamps the terrain to puts them back on the ground.
+// Everywhere else the prop's own sample already *is* the minimum, so nothing
+// moves. Brute-force over the 600 samples: this runs a few dozen times at
+// track-build time, not per frame.
+// Only for props set back beyond the grass ribbon -- cones (on the grass) and
+// the ring gates / arch banner (over the road) still key off the ribbon.
+function propGroundY(samples: TrackSample[], x: number, z: number, fallbackY: number): number {
+  const radiusSq = TERRAIN_CLAMP_RADIUS * TERRAIN_CLAMP_RADIUS;
+  let lowest = fallbackY;
+  for (const sample of samples) {
+    const dx = sample.pos.x - x;
+    const dz = sample.pos.z - z;
+    if (dx * dx + dz * dz <= radiusSq && sample.pos.y < lowest) lowest = sample.pos.y;
+  }
+  return lowest - GROUND_SINK;
+}
+
 function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   const group = new THREE.Group();
   const n = samples.length;
@@ -428,17 +466,20 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   const topMesh = new THREE.InstancedMesh(topGeo, topMat, treeIndices.length);
   topMesh.castShadow = true; // §Phase 4 item 3
 
-  // §Phase 5 item 2: translations are pos.y + a local offset, not an absolute
-  // world y -- otherwise trees near the hill would float or bury themselves.
+  // §Phase 5 item 2: translations are a local ground height + a local offset,
+  // not an absolute world y -- otherwise trees near the hill would float or
+  // bury themselves. §v3 Track A review finding #2: that ground height is now
+  // propGroundY, not the sample's own y (see above).
   const m = new THREE.Matrix4();
   treeIndices.forEach((idx, i) => {
     const side = i % 2 === 0 ? 1 : -1;
     const sample = samples[idx];
     const offset = GRASS_HALF + 3 + (i % 3);
     const pos = sample.pos.clone().addScaledVector(sample.right, side * offset);
-    m.makeTranslation(pos.x, pos.y + 0.6, pos.z);
+    const groundY = propGroundY(samples, pos.x, pos.z, sample.pos.y);
+    m.makeTranslation(pos.x, groundY + 0.6, pos.z);
     trunkMesh.setMatrixAt(i, m);
-    m.makeTranslation(pos.x, pos.y + 1.2 + 1.1, pos.z);
+    m.makeTranslation(pos.x, groundY + 1.2 + 1.1, pos.z);
     topMesh.setMatrixAt(i, m);
   });
   trunkMesh.instanceMatrix.needsUpdate = true;
@@ -703,25 +744,29 @@ function buildWarpPipe(): THREE.Group {
 function buildSetPieces(samples: TrackSample[], totalLength: number): THREE.Group {
   const group = new THREE.Group();
 
-  function placeAt(obj: THREE.Object3D, s: number, lateral: number, extraYaw = 0) {
+  // `onTerrain` props sit beyond the grass ribbon, so they are planted on the
+  // heightfield's floor rather than on their own sample (§v3 Track A review
+  // finding #2, see propGroundY). Props over the road keep the ribbon height.
+  function placeAt(obj: THREE.Object3D, s: number, lateral: number, extraYaw = 0, onTerrain = false) {
     const sample = sampleAtArcLength(samples, totalLength, s);
     obj.position.copy(sample.pos).addScaledVector(sample.right, lateral);
+    if (onTerrain) obj.position.y = propGroundY(samples, obj.position.x, obj.position.z, sample.pos.y);
     obj.rotation.y = Math.atan2(sample.forward.x, sample.forward.z) + extraYaw;
     group.add(obj);
   }
 
   // Grandstands: one on the start straight, one facing the long back
   // straight, both set back beyond the grass, facing in toward the road.
-  placeAt(buildGrandstand(), 40, GRASS_HALF + 9, -Math.PI / 2);
-  placeAt(buildGrandstand(), 540, -(GRASS_HALF + 9), Math.PI / 2);
+  placeAt(buildGrandstand(), 40, GRASS_HALF + 9, -Math.PI / 2, true);
+  placeAt(buildGrandstand(), 540, -(GRASS_HALF + 9), Math.PI / 2, true);
 
   // Arch banner spanning the road partway around the esses/back-straight transition.
   placeAt(buildArchBanner(), 470, 0);
 
   // Warp-pipe clusters flanking the double-apex and the hairpin.
-  placeAt(buildWarpPipe(), 165, GRASS_HALF + 4);
-  placeAt(buildWarpPipe(), 178, GRASS_HALF + 7);
-  placeAt(buildWarpPipe(), 752, -(GRASS_HALF + 4));
+  placeAt(buildWarpPipe(), 165, GRASS_HALF + 4, 0, true);
+  placeAt(buildWarpPipe(), 178, GRASS_HALF + 7, 0, true);
+  placeAt(buildWarpPipe(), 752, -(GRASS_HALF + 4), 0, true);
 
   return group;
 }

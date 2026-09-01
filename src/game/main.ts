@@ -103,11 +103,17 @@ renderer.shadowMap.autoUpdate = false;
 app.appendChild(renderer.domElement);
 
 const lights = buildLights(scene);
-buildEnvironment(scene); // §Phase 4 item 2: sky dome, mountains, clouds, fog, ground plane
 
+// §v3 Track A: the track (and its TrackQuery) must exist *before* the
+// environment now — buildEnvironment's ground is no longer a flat plane, it's
+// a heightfield draped over the circuit's own elevation, so it needs to query
+// track heights while it builds. scene.background/fog assignment inside
+// buildEnvironment is order-independent, so nothing else cares about the swap.
 const track = buildTrack();
 scene.add(track.group);
 const trackQuery = new TrackQuery(track.samples, track.totalLength);
+
+buildEnvironment(scene, trackQuery); // §Phase 4 item 2: sky dome, mountains, clouds, fog, ground (§v3 Track A: terrain heightfield)
 
 // Staggered 2-2-2 grid start (Phase 2b grows this from 1-2-2 to fit a second
 // human-capable kart), spaced so no pair starts closer than 2*kartRadius:
