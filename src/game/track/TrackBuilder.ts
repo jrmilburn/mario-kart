@@ -27,6 +27,7 @@ const RAW_SAMPLE_COUNT = 2000;
 const STRIPE_WIDTH = 0.4;
 const WALL_HEIGHT = 1.2;
 const TEXTURE_V_SCALE = 8; // meters of arc length per texture repeat, longitudinally (§Phase 4 item 1)
+const SKIRT_BOTTOM_Y = -2.5; // §Phase 5 elevation review fix #2: below Environment.ts's flat ground plane (y=-0.05)
 
 const UP = new THREE.Vector3(0, 1, 0);
 const MAX_SAMPLE_GRADE = 0.12; // §Phase 5 item 1: dev-time budget for adjacent-sample |dy/ds|
@@ -84,10 +85,12 @@ function buildSamples(): { samples: TrackSample[]; totalLength: number } {
   return { samples, totalLength };
 }
 
-// §Phase 5 item 1: dev-time sanity check on the authored heights -- warns
-// (doesn't throw) if the Catmull-Rom-smoothed per-sample slope ever exceeds
-// the ~10% grade budget by a meaningful margin, catching an over-steep
-// control-point edit before it ships. Wrap-aware at the start/finish seam.
+// §Phase 5 item 1: a cheap one-time startup sanity check on the authored
+// heights -- warns (doesn't throw) if the Catmull-Rom-smoothed per-sample
+// slope ever exceeds the ~10% grade budget by a meaningful margin, catching
+// an over-steep control-point edit before it ships. Runs unconditionally
+// (it's O(n) over the sample count, once, at track build time -- not worth
+// gating behind a dev-only flag). Wrap-aware at the start/finish seam.
 function checkGradeSafety(samples: TrackSample[], totalLength: number) {
   const n = samples.length;
   for (let i = 0; i < n; i++) {
@@ -292,6 +295,51 @@ function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
   geometry.computeVertexNormals();
 
   return new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+}
+
+// §Phase 5 elevation review fix #2: on graded (hilly) sections, the grass
+// ribbon's outer edge now sits above/below Environment.ts's flat far-field
+// ground plane (y=-0.05), exposing a floating-cliff gap underneath on hills.
+// A vertical "skirt" strip from the grass outer edge straight down to a
+// constant y hides that gap. No UVs needed (flat vertex color), so this
+// follows buildWallMeshes's %n indexing (no seam-duplicate ring) rather than
+// the road/grass builders' n+1-ring pattern.
+const skirtColor = new THREE.Color(0x3f5c34); // earthy brown-green, darker than the grass ribbon's 0x5cb85c
+
+function buildGroundSkirtMesh(samples: TrackSample[]): THREE.Mesh {
+  const n = samples.length;
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const indices: number[] = [];
+
+  function addSkirtStrip(side: 1 | -1, vertexOffset: number) {
+    for (let i = 0; i < n; i++) {
+      const { pos, right } = samples[i];
+      const top = pos.clone().addScaledVector(right, side * GRASS_HALF);
+      positions.push(top.x, top.y, top.z, top.x, SKIRT_BOTTOM_Y, top.z);
+      colors.push(skirtColor.r, skirtColor.g, skirtColor.b, skirtColor.r, skirtColor.g, skirtColor.b);
+    }
+    for (let i = 0; i < n; i++) {
+      const a = vertexOffset + i * 2;
+      const b = vertexOffset + ((i + 1) % n) * 2;
+      // winding flips per side so both skirts face outward, same convention as buildWallMeshes
+      if (side === 1) indices.push(a, b, b + 1, a, b + 1, a + 1);
+      else indices.push(a, a + 1, b + 1, a, b + 1, b);
+    }
+  }
+
+  addSkirtStrip(-1, 0);
+  addSkirtStrip(1, n * 2);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  mesh.receiveShadow = false; // underside strip, never lit by the overhead directional light in a way worth shadowing
+  return mesh;
 }
 
 function buildCheckerTexture(): THREE.CanvasTexture {
@@ -701,6 +749,7 @@ export function buildTrack(): TrackData {
   const group = new THREE.Group();
   group.add(buildRoadMesh(samples, totalLength));
   group.add(buildGrassMesh(samples, totalLength));
+  group.add(buildGroundSkirtMesh(samples));
   group.add(buildWallMeshes(samples));
   group.add(buildStartFinish(samples[checkpoints[0]]));
   group.add(buildTracksideProps(samples));

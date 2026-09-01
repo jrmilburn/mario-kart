@@ -89,6 +89,14 @@ export function updateShadowBounds(lights: Lights, playerDistance: number) {
 // once/if it loads).
 export function buildKart(def: CharacterDef): KartVisual {
   const group = new THREE.Group();
+  // §Phase 5 elevation review fix #1: default Euler order 'XYZ' couples
+  // rotation.x (pitch) and rotation.y (heading) -- rotating y first (as XYZ
+  // does, applied intrinsically z-then-y-then-x) tips the pitch axis itself,
+  // so the nose-tilt sign flips as a function of heading. 'YXZ' applies yaw
+  // first and then pitches about the yawed local X axis, which is exactly
+  // what updateKartVisual wants: nose-tilt should equal `grade` regardless of
+  // heading. Set once here rather than per-frame in updateKartVisual.
+  group.rotation.order = 'YXZ';
 
   const body = new THREE.Mesh(
     new THREE.BoxGeometry(1.2, 0.5, 2.2),
