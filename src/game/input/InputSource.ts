@@ -13,20 +13,35 @@ const NEUTRAL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0, item:
 // Keyboard input stays "active" this long after the last mapped keypress (D12).
 const KEYBOARD_OVERRIDE_MS = 2000;
 
-const THROTTLE_CODES = ['KeyW', 'ArrowUp'];
-const BRAKE_CODES = ['KeyS', 'ArrowDown'];
-const LEFT_CODES = ['KeyA', 'ArrowLeft'];
-const RIGHT_CODES = ['KeyD', 'ArrowRight'];
-const DRIFT_CODES = ['ShiftLeft', 'ShiftRight'];
-const ITEM_CODES = ['KeyK'];
-const MAPPED_CODES = new Set([
-  ...THROTTLE_CODES,
-  ...BRAKE_CODES,
-  ...LEFT_CODES,
-  ...RIGHT_CODES,
-  ...DRIFT_CODES,
-  ...ITEM_CODES,
-]);
+// Phase 2b: each InputSource instance owns one player's keyboard mapping, so
+// P1 (WASD/left-shift/K) and P2 (arrows/right-shift/slash) can drive
+// independently from the same keyboard.
+export interface Keymap {
+  throttle: string[];
+  brake: string[];
+  left: string[];
+  right: string[];
+  drift: string[];
+  item: string[];
+}
+
+export const KEYMAP_P1: Keymap = {
+  throttle: ['KeyW'],
+  brake: ['KeyS'],
+  left: ['KeyA'],
+  right: ['KeyD'],
+  drift: ['ShiftLeft'],
+  item: ['KeyK'],
+};
+
+export const KEYMAP_P2: Keymap = {
+  throttle: ['ArrowUp'],
+  brake: ['ArrowDown'],
+  left: ['ArrowLeft'],
+  right: ['ArrowRight'],
+  drift: ['ShiftRight'],
+  item: ['Slash'],
+};
 
 export interface InputDiagnostics {
   source: 'keyboard' | 'controller' | 'neutral';
@@ -44,15 +59,27 @@ export class InputSource {
   private latestReceivedAt = 0;
   private keysDown = new Set<string>();
   private lastKeyboardActivityAt = -Infinity;
+  private mappedCodes: Set<string>;
+
+  constructor(private keymap: Keymap = KEYMAP_P1) {
+    this.mappedCodes = new Set([
+      ...keymap.throttle,
+      ...keymap.brake,
+      ...keymap.left,
+      ...keymap.right,
+      ...keymap.drift,
+      ...keymap.item,
+    ]);
+  }
 
   attachKeyboard() {
     window.addEventListener('keydown', (e) => {
-      if (!MAPPED_CODES.has(e.code)) return;
+      if (!this.mappedCodes.has(e.code)) return;
       this.keysDown.add(e.code);
       this.lastKeyboardActivityAt = performance.now();
     });
     window.addEventListener('keyup', (e) => {
-      if (!MAPPED_CODES.has(e.code)) return;
+      if (!this.mappedCodes.has(e.code)) return;
       this.keysDown.delete(e.code);
     });
     window.addEventListener('blur', () => this.keysDown.clear());
@@ -73,22 +100,19 @@ export class InputSource {
   }
 
   private keyboardControlState(): ControlState {
-    const left = this.keysDown.has(LEFT_CODES[0]) || this.keysDown.has(LEFT_CODES[1]);
-    const right = this.keysDown.has(RIGHT_CODES[0]) || this.keysDown.has(RIGHT_CODES[1]);
+    const { throttle, brake, left, right, drift, item } = this.keymap;
+    const isLeft = left.some((c) => this.keysDown.has(c));
+    const isRight = right.some((c) => this.keysDown.has(c));
     let steer = 0;
-    if (left && !right) steer = -1;
-    else if (right && !left) steer = 1;
+    if (isLeft && !isRight) steer = -1;
+    else if (isRight && !isLeft) steer = 1;
 
-    const throttle = THROTTLE_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
-    const brake = BRAKE_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
-    const drift = DRIFT_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
-    const item = ITEM_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
     return {
       steer,
-      throttle: throttle as 0 | 1,
-      brake: brake as 0 | 1,
-      drift: drift as 0 | 1,
-      item: item as 0 | 1,
+      throttle: throttle.some((c) => this.keysDown.has(c)) ? 1 : 0,
+      brake: brake.some((c) => this.keysDown.has(c)) ? 1 : 0,
+      drift: drift.some((c) => this.keysDown.has(c)) ? 1 : 0,
+      item: item.some((c) => this.keysDown.has(c)) ? 1 : 0,
     };
   }
 

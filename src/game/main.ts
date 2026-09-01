@@ -1,6 +1,8 @@
 import * as THREE from 'three';
+import { CONTROLLER_ABSENT_MS, type PlayerSlot } from '../shared/protocol';
 import { GameSocket } from './net/GameSocket';
-import { InputSource, type ControlState } from './input/InputSource';
+import { type ControlState } from './input/InputSource';
+import { createPlayer, type Player } from './player/Player';
 import { Hud } from './ui/Hud';
 import { Diagnostics } from './ui/Diagnostics';
 import { startLoop } from './core/loop';
@@ -16,7 +18,6 @@ import {
   buildShellMesh,
   type KartVisual,
 } from './render/SceneBuilder';
-import { FollowCamera } from './render/FollowCamera';
 import { buildTrack } from './track/TrackBuilder';
 import { TrackQuery, sampleAtArcLength } from './track/TrackQuery';
 import { GRASS_HALF, ROAD_HALF } from './track/trackData';
@@ -45,6 +46,7 @@ import { Minimap } from './ui/Minimap';
 
 const NEUTRAL_CONTROL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0, item: 0 };
 const PLAYER_FINISH_DELAY_SECONDS = 1.5;
+const COLLISION_HAPTIC_COOLDOWN_SECONDS = 0.3; // avoid vibration spam while wall-scraping
 
 interface KartEntity {
   kart: KartState;
@@ -57,6 +59,10 @@ interface KartEntity {
   itemState: HeldItemState;
   prevItemInput: 0 | 1;
   colorHex: string;
+  // Per-entity haptic bookkeeping (Phase 2b: up to two human entities need
+  // independent cooldown/edge tracking instead of one pair of module-scope vars).
+  collisionHapticCooldown: number;
+  prevBoostTimer: number;
 }
 
 const app = document.getElementById('app')!;
@@ -64,8 +70,6 @@ const app = document.getElementById('app')!;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x6ec6ff); // bright cheerful sky blue
 scene.fog = new THREE.Fog(0x6ec6ff, 70, 260);
-
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -79,14 +83,18 @@ const track = buildTrack();
 scene.add(track.group);
 const trackQuery = new TrackQuery(track.samples, track.totalLength);
 
-// Staggered 1-2-2 grid start (§Phase 6), spaced so no pair starts closer than
-// 2*kartRadius: player alone at the line, then two rows of two further back.
-const GRID = [
-  { name: 'YOU', color: 0xff6b35, isAi: false, s: 0, lane: 0 },
-  { name: 'AI 1', color: 0x3498db, isAi: true, s: -4, lane: -2 },
-  { name: 'AI 2', color: 0x2ecc71, isAi: true, s: -4, lane: 0.7 },
-  { name: 'AI 3', color: 0xf1c40f, isAi: true, s: -8, lane: 2 },
-  { name: 'AI 4', color: 0x9b59b6, isAi: true, s: -8, lane: -0.7 },
+// Staggered 2-2-2 grid start (Phase 2b grows this from 1-2-2 to fit a second
+// human-capable kart), spaced so no pair starts closer than 2*kartRadius:
+// P1/P2 side by side at the line, then two rows of two AI further back.
+// `humanSlot` marks entities 0-1 as human-capable; entity 1 falls back to AI
+// whenever P2 isn't active (roster locked at countdown, see lockRoster below).
+const GRID: { name: string; color: number; s: number; lane: number; humanSlot?: PlayerSlot }[] = [
+  { name: 'P1', color: 0xff6b35, s: 0, lane: -1.2, humanSlot: 0 },
+  { name: 'P2', color: 0x3498db, s: 0, lane: 1.2, humanSlot: 1 },
+  { name: 'AI 1', color: 0x2ecc71, s: -4, lane: -2 },
+  { name: 'AI 2', color: 0xf1c40f, s: -4, lane: 0.7 },
+  { name: 'AI 3', color: 0x9b59b6, s: -8, lane: 2 },
+  { name: 'AI 4', color: 0xe74c3c, s: -8, lane: -0.7 },
 ];
 
 function spawnPose(sOffset: number, lane: number): { pos: THREE.Vector3; heading: number } {
@@ -96,25 +104,58 @@ function spawnPose(sOffset: number, lane: number): { pos: THREE.Vector3; heading
   return { pos, heading };
 }
 
-const entities: KartEntity[] = GRID.map((g) => {
+const entities: KartEntity[] = GRID.map((g, i) => {
   const { pos, heading } = spawnPose(g.s, g.lane);
-  const kart = createKart(pos, heading, g.isAi);
+  const isAi = g.humanSlot === undefined;
+  const kart = createKart(pos, heading, isAi);
   const visual = buildKart(g.color);
   scene.add(visual.group, visual.shadow);
   return {
     kart,
     visual,
     lapProgress: createLapProgress(0),
-    ai: g.isAi ? createAiState(g.lane) : null,
+    ai: i === 0 ? null : createAiState(g.lane), // entity 0 (P1) is never AI; entity 1 carries a fallback AiState
     name: g.name,
     spawnS: g.s,
     spawnLane: g.lane,
     itemState: createHeldItemState(),
     prevItemInput: 0 as const,
     colorHex: `#${g.color.toString(16).padStart(6, '0')}`,
+    collisionHapticCooldown: 0,
+    prevBoostTimer: 0,
   };
 });
-const player = entities[0];
+const player = entities[0]; // P1's entity — still the sole HUD/engine-audio/camera reference until Phase 2c
+
+// Phase 2b: one Player per controller slot, each owning its own input source,
+// keymap, and camera rig. P1 always drives entity 0; P2 drives entity 1 only
+// when active (see lockRoster) — otherwise entity 1 races as AI.
+const players: [Player, Player] = [createPlayer(0, 0), createPlayer(1, 1)];
+for (const p of players) p.inputSource.attachKeyboard();
+
+function entityFor(p: Player): KartEntity {
+  return entities[p.entityIndex];
+}
+
+// One age per *active* human player, keyboard-override-aware (null = keyboard
+// is covering for that player right now, so a stale/absent phone doesn't matter).
+function activeControllerAges(now: number): (number | null)[] {
+  return players
+    .filter((p) => p.active)
+    .map((p) => (p.inputSource.isKeyboardActive(now) ? null : p.inputSource.rawControllerAgeMs(now)));
+}
+
+function allActiveControllersFresh(now: number): boolean {
+  return activeControllerAges(now).every((age) => age === null || age <= CONTROLLER_ABSENT_MS);
+}
+
+// Roster locks at the moment countdown begins (Phase 2b): P2 drives entity 1
+// for this race iff it's connected or driving via keyboard right now;
+// otherwise entity 1 runs as AI for the whole race, even if P2 joins mid-race.
+function lockRoster() {
+  const now = performance.now();
+  players[1].active = players[1].connected || players[1].inputSource.isKeyboardActive(now);
+}
 
 // §Phase 11 juice: pooled drift-spark particles, WebAudio engine hum, minimap.
 const driftSparks = new DriftSparks();
@@ -138,14 +179,10 @@ const shells: Shell[] = [];
 const bananaVisuals = new Map<Banana, THREE.Mesh>();
 const shellVisuals = new Map<Shell, THREE.Mesh>();
 
-const followCamera = new FollowCamera(camera);
 const lapTracker = new LapTracker(track.checkpoints, track.samples, track.totalLength);
 
 let finishCounter = 0;
 let playerFinishTimer: number | null = null;
-let prevPlayerBoostTimer = 0;
-let collisionHapticCooldown = 0;
-const COLLISION_HAPTIC_COOLDOWN_SECONDS = 0.3; // avoid vibration spam while wall-scraping
 
 // Immediately ahead of `selfIndex` by race progress; null if already leading
 // (nothing to target a homing shell at).
@@ -207,6 +244,8 @@ function resetRace() {
     }
     e.itemState = createHeldItemState();
     e.prevItemInput = 0;
+    e.collisionHapticCooldown = 0;
+    e.prevBoostTimer = 0;
   }
   for (const box of itemBoxes) {
     box.active = true;
@@ -236,8 +275,10 @@ function finalizeUnfinishedByProgress() {
 }
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
+  // Phase 2b: still solo full-screen (split-screen viewport/aspect handling
+  // lands in Phase 2c) — only P1's camera renders today.
+  players[0].camera.aspect = window.innerWidth / window.innerHeight;
+  players[0].camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
@@ -245,14 +286,13 @@ window.addEventListener('resize', () => {
 
 const hud = new Hud(app);
 const diagnostics = new Diagnostics(app);
-const inputSource = new InputSource();
-inputSource.attachKeyboard();
 let lastRttMs: number | null = null;
 
 const raceDirector = new RaceDirector({
-  onEvent: (name) => socket.sendEvent(name),
+  onEvent: (name) => socket.sendEvent(name), // broadcast to both controllers (no slot)
   onStateChange: (state) => {
     if (state === 'LOBBY') resetRace();
+    if (state === 'COUNTDOWN') lockRoster();
   },
 });
 
@@ -262,15 +302,20 @@ const socket = new GameSocket({
   onRtt: (rtt) => {
     lastRttMs = rtt;
   },
-  onPeer: (event) => {
+  onPeer: (event, slot) => {
+    const s = slot ?? 0;
+    players[s].connected = event === 'controller-joined';
     if (event === 'controller-joined') hud.setPeerConnected(true);
     else hud.setPeerConnected(false);
   },
   onInput: (snapshot) => {
-    inputSource.onSnapshot(snapshot);
-    if (raceDirector.state === 'PAUSED') raceDirector.notifyInputRecovered();
+    const slot = snapshot.slot ?? 0;
+    players[slot].inputSource.onSnapshot(snapshot);
+    if (raceDirector.state === 'PAUSED') raceDirector.notifyInputRecovered(allActiveControllersFresh(performance.now()));
   },
   onEvent: (name) => {
+    // Either controller's start/restart is honored (Phase 2b) — the sender's
+    // slot (server-stamped) doesn't gate these, both act on the shared race state.
     if (name === 'start') raceDirector.requestStart();
     else if (name === 'restart') raceDirector.requestRestart();
   },
@@ -280,7 +325,7 @@ void socket;
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Enter') raceDirector.requestStart();
   if (e.code === 'KeyR') raceDirector.requestRestart();
-  if (raceDirector.state === 'PAUSED') raceDirector.notifyInputRecovered();
+  if (raceDirector.state === 'PAUSED') raceDirector.notifyInputRecovered(allActiveControllersFresh(performance.now()));
 });
 
 // --- Fixed-timestep physics + rAF render ----------------------------------
@@ -290,17 +335,14 @@ let lastRenderTime = performance.now();
 startLoop(
   (dt) => {
     const now = performance.now();
-    // While keyboard is actively driving (D12), it fully substitutes for the
-    // controller, so phone absence shouldn't re-trigger the pause watchdog.
-    const controllerAgeMs = inputSource.isKeyboardActive(now) ? null : inputSource.rawControllerAgeMs(now);
-    raceDirector.tick(dt, controllerAgeMs);
+    raceDirector.tick(dt, activeControllerAges(now));
 
     if (raceDirector.state === 'PAUSED') return; // physics frozen entirely
 
     const racing = raceDirector.state === 'RACING';
     if (racing) updateItemBoxes(itemBoxes, dt);
 
-    let playerHitWallThisTick = false;
+    const hitWallThisTick: boolean[] = new Array(entities.length).fill(false);
 
     for (let i = 0; i < entities.length; i++) {
       const e = entities[i];
@@ -308,11 +350,17 @@ startLoop(
       const offRoad = Math.abs(preSample.lateral) > ROAD_HALF;
       const onWall = Math.abs(preSample.lateral) >= GRASS_HALF - TUNING.kartRadius;
 
+      // Roster is locked at countdown (lockRoster): entity 0 is always P1,
+      // entity 1 is P2 only when active, everything else is always AI.
+      const drivingPlayer = i === 0 ? players[0] : i === 1 && players[1].active ? players[1] : null;
+
       let control: ControlState;
       let topSpeedScale = 1;
 
       if (!racing) {
         control = NEUTRAL_CONTROL;
+      } else if (drivingPlayer) {
+        control = drivingPlayer.inputSource.sample(now);
       } else if (e.ai) {
         const result = think(
           e.ai,
@@ -329,12 +377,11 @@ startLoop(
         control = result.control;
         topSpeedScale = result.topSpeedScale;
       } else {
-        control = inputSource.sample(now);
+        control = NEUTRAL_CONTROL; // unreachable: every non-human entity carries an AiState
       }
 
       stepKart(e.kart, control, dt, offRoad, topSpeedScale);
-      const hitWall = resolveWallCollision(e.kart, trackQuery);
-      if (i === 0 && hitWall) playerHitWallThisTick = true;
+      hitWallThisTick[i] = resolveWallCollision(e.kart, trackQuery);
 
       if (racing) {
         tryPickupItemBox(itemBoxes, track.samples, e.kart.pos, e.itemState);
@@ -342,7 +389,10 @@ startLoop(
 
         const itemPressed = control.item === 1 && e.prevItemInput === 0;
         e.prevItemInput = control.item;
-        const wantsFire = e.ai ? tickAiItemDecision(e.itemState, dt) : itemPressed;
+        // Keyed off who's actually driving this tick, not `e.ai`'s mere
+        // presence — entity 1 always carries a fallback AiState (Phase 2b),
+        // but must use press-edge firing whenever P2 is actively driving it.
+        const wantsFire = drivingPlayer ? itemPressed : tickAiItemDecision(e.itemState, dt);
         if (wantsFire) {
           useItem({
             kartIndex: i,
@@ -367,19 +417,25 @@ startLoop(
       updateShells(shells, entities.map((e) => e.kart), track.samples, track.totalLength, dt);
     }
 
-    // §Phase 11d haptic/audio cues for the player's own hits and boosts.
-    collisionHapticCooldown = Math.max(0, collisionHapticCooldown - dt);
-    const playerCollided = playerHitWallThisTick || kartKartHits.has(0);
-    if (racing && playerCollided && collisionHapticCooldown <= 0) {
-      socket.sendEvent('collision');
-      engineAudio.burst(0.12, 0.1);
-      collisionHapticCooldown = COLLISION_HAPTIC_COOLDOWN_SECONDS;
+    // §Phase 11d haptic/audio cues, now per active human player (Phase 2b) —
+    // each phone only feels its own hits/boosts; engine audio stays P1-only
+    // (deliberate simplification, §Phase 2b).
+    for (const p of players) {
+      if (!p.active) continue;
+      const e = entityFor(p);
+      e.collisionHapticCooldown = Math.max(0, e.collisionHapticCooldown - dt);
+      const collided = hitWallThisTick[p.entityIndex] || kartKartHits.has(p.entityIndex);
+      if (racing && collided && e.collisionHapticCooldown <= 0) {
+        socket.sendEvent('collision', p.slot);
+        if (p.slot === 0) engineAudio.burst(0.12, 0.1);
+        e.collisionHapticCooldown = COLLISION_HAPTIC_COOLDOWN_SECONDS;
+      }
+      if (racing && e.kart.boostTimer > 0 && e.prevBoostTimer <= 0) {
+        socket.sendEvent('boost', p.slot);
+        if (p.slot === 0) engineAudio.burst(0.2, 0.2);
+      }
+      e.prevBoostTimer = e.kart.boostTimer;
     }
-    if (racing && player.kart.boostTimer > 0 && prevPlayerBoostTimer <= 0) {
-      socket.sendEvent('boost');
-      engineAudio.burst(0.2, 0.2);
-    }
-    prevPlayerBoostTimer = player.kart.boostTimer;
 
     if (racing) {
       for (const e of entities) {
@@ -391,7 +447,10 @@ startLoop(
         }
       }
 
-      if (player.lapProgress.finished && playerFinishTimer === null) {
+      // Finish timer starts once every active human has finished (Phase 2b) —
+      // solo play (only P1 active) behaves exactly as before.
+      const allActiveHumansFinished = players.filter((p) => p.active).every((p) => entityFor(p).lapProgress.finished);
+      if (allActiveHumansFinished && playerFinishTimer === null) {
         playerFinishTimer = PLAYER_FINISH_DELAY_SECONDS;
       }
       if (playerFinishTimer !== null) {
@@ -411,7 +470,9 @@ startLoop(
     lastRenderTime = now;
 
     for (const e of entities) updateKartVisual(e.visual, e.kart, renderDt);
-    followCamera.update(player.kart, renderDt);
+    // Phase 2b: still solo full-screen — split-screen rendering with both
+    // players' cameras lands in Phase 2c.
+    players[0].followCamera.update(player.kart, renderDt);
 
     const driftActive = player.kart.drift.phase === 'active';
     const maxTierTime = TUNING.driftTierTimes[TUNING.driftTierTimes.length - 1];
@@ -479,7 +540,7 @@ startLoop(
         break;
     }
 
-    const diag = inputSource.diagnostics();
+    const diag = players[0].inputSource.diagnostics();
     hud.setKeyboardActive(diag.source === 'keyboard');
     hud.setSteerMode(diag.source === 'controller' ? diag.steerMode : null);
     diagnostics.update({
@@ -493,6 +554,6 @@ startLoop(
       stepsThisFrame,
     });
 
-    renderer.render(scene, camera);
+    renderer.render(scene, players[0].camera);
   },
 );

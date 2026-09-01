@@ -1,0 +1,41 @@
+import * as THREE from 'three';
+import type { PlayerSlot } from '../../shared/protocol';
+import { InputSource, KEYMAP_P1, KEYMAP_P2 } from '../input/InputSource';
+import { FollowCamera } from '../render/FollowCamera';
+
+const KEYMAP_BY_SLOT: Record<PlayerSlot, typeof KEYMAP_P1> = {
+  0: KEYMAP_P1,
+  1: KEYMAP_P2,
+};
+
+// One human seat: a controller slot paired with the kart entity it drives,
+// its own input source/keymap, and its own camera rig. `connected` tracks the
+// live controller-joined/left peer state; `active` is the roster decision
+// (locked at countdown, Phase 2b) that decides whether `entityIndex` is
+// actually driven by this player's input this race, vs. falling back to AI.
+export interface Player {
+  slot: PlayerSlot;
+  entityIndex: number;
+  inputSource: InputSource;
+  camera: THREE.PerspectiveCamera;
+  followCamera: FollowCamera;
+  connected: boolean;
+  active: boolean;
+}
+
+// P1 (slot 0) is the mandatory, always-active player — entity 0 is always
+// human-capable-only, exactly matching v1's single-player behavior. P2 (slot
+// 1) starts inactive; RaceDirector's countdown lock decides whether it drives
+// entity 1 for the upcoming race (see main.ts's roster-lock logic).
+export function createPlayer(slot: PlayerSlot, entityIndex: number): Player {
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+  return {
+    slot,
+    entityIndex,
+    inputSource: new InputSource(KEYMAP_BY_SLOT[slot]),
+    camera,
+    followCamera: new FollowCamera(camera),
+    connected: false,
+    active: slot === 0,
+  };
+}
