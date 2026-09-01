@@ -404,83 +404,157 @@ export function initControllerUI(root: HTMLElement) {
   raceStatusText.style.cssText = 'font-size:22px; text-align:center; padding:0 24px;';
   raceOverlay.appendChild(raceStatusText);
 
-  // §Phase 3 character panel: grid of 6 tiles (name + color swatch), shown
-  // only in the lobby. Lives inside raceOverlay (the only lobby-state
-  // surface, so this is the one place taps actually reach it) but follows
-  // the same dedicated-panel/explicit-show-hide convention as
-  // codeEntryPanel/playPanel — its own element, its own show/hide functions,
-  // untangled from the overlay's own start/restart logic.
-  const characterPanel = document.createElement('div');
-  characterPanel.style.cssText =
-    'display:none; grid-template-columns:repeat(3, 1fr); gap:8px; width:100%; max-width:380px;';
-  raceOverlay.appendChild(characterPanel);
-
-  interface CharacterTile {
-    id: string;
-    button: HTMLButtonElement;
-  }
-  const characterTiles: CharacterTile[] = CHARACTERS.map((c) => {
-    const button = document.createElement('button');
-    button.style.cssText =
-      'display:flex; flex-direction:column; align-items:center; gap:4px; padding:8px 4px; ' +
-      'border-radius:12px; border:2px solid transparent; background:rgba(255,255,255,0.12); ' +
-      'color:#fff; font-size:12px; font-weight:700; touch-action:manipulation;';
-    const swatch = document.createElement('div');
-    swatch.style.cssText =
-      `width:24px; height:24px; border-radius:50%; background:#${c.kartColor.toString(16).padStart(6, '0')}; ` +
-      'border:1px solid rgba(255,255,255,0.4);';
-    const label = document.createElement('div');
-    label.textContent = c.name;
-    button.append(swatch, label);
-    button.addEventListener('click', () => {
-      if (button.disabled) return;
-      activeSocket?.sendSelect(c.id);
-    });
-    characterPanel.appendChild(button);
-    return { id: c.id, button };
-  });
-
-  let mySlot: PlayerSlot | null = null;
-  let latestPicks: RosterPick[] = [];
-
-  // Own pick highlighted; tiles the *other* connected slot currently holds
-  // are greyed and non-tappable. AI picks never appear here (those are
-  // resolved server-side only at countdown), so there's nothing to grey
-  // out on their account.
-  function renderCharacterTiles() {
-    const otherSlot: PlayerSlot | null = mySlot === 0 ? 1 : mySlot === 1 ? 0 : null;
-    const minePick = mySlot !== null ? latestPicks.find((p) => p.slot === mySlot)?.characterId ?? null : null;
-    const otherPick = otherSlot !== null ? latestPicks.find((p) => p.slot === otherSlot)?.characterId ?? null : null;
-    for (const tile of characterTiles) {
-      const taken = otherPick === tile.id;
-      tile.button.disabled = taken;
-      tile.button.style.opacity = taken ? '0.35' : '1';
-      tile.button.style.cursor = taken ? 'default' : 'pointer';
-      tile.button.style.borderColor = minePick === tile.id ? '#fff' : 'transparent';
-    }
-  }
-
-  function showCharacterPanel() {
-    characterPanel.style.display = 'grid';
-  }
-
-  function hideCharacterPanel() {
-    characterPanel.style.display = 'none';
-  }
-
-  const startBtn = document.createElement('button');
-  startBtn.textContent = 'START RACE';
-  startBtn.style.cssText =
-    'font-size:20px; font-weight:800; padding:18px 36px; border-radius:16px; border:none; ' +
-    'background:#27ae60; color:#fff;';
-  raceOverlay.appendChild(startBtn);
-
   const restartBtn = document.createElement('button');
   restartBtn.textContent = 'RESTART';
   restartBtn.style.cssText =
     'font-size:20px; font-weight:800; padding:18px 36px; border-radius:16px; border:none; ' +
     'background:#2980b9; color:#fff;';
   raceOverlay.appendChild(restartBtn);
+
+  // §Track D: character select used to be a grid squeezed inside raceOverlay
+  // alongside the status text/START button, layered over the translucent
+  // play panel — the user's "overlaps with other parts of the controller"
+  // complaint. It is now its own dedicated, fully OPAQUE full-screen
+  // controller screen so nothing behind it (play panel, raceOverlay) bleeds
+  // through. Stacking: below the portrait blocker (z-index 20, §3.7) and the
+  // toast (z-index 30) — both must still render over it — above everything
+  // else (z-index 16). Layout target is a landscape phone (~700x340 CSS px):
+  // header row / large 3x2 tile grid filling the height / footer row.
+  const characterScreen = document.createElement('div');
+  characterScreen.style.cssText =
+    'position:fixed; inset:0; z-index:16; display:none; flex-direction:column; ' +
+    'background:linear-gradient(180deg, #1a1f27 0%, #0f1216 100%); color:#fff;';
+  root.appendChild(characterScreen);
+
+  const csHeader = document.createElement('div');
+  csHeader.style.cssText =
+    'flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; ' +
+    'padding:12px 20px; gap:12px;';
+  characterScreen.appendChild(csHeader);
+
+  const csTitle = document.createElement('div');
+  csTitle.textContent = 'CHOOSE YOUR RACER';
+  csTitle.style.cssText = 'font-size:16px; font-weight:800; letter-spacing:2px;';
+  csHeader.appendChild(csTitle);
+
+  const csBody = document.createElement('div');
+  csBody.style.cssText =
+    'flex:1; min-height:0; display:grid; grid-template-columns:repeat(3, 1fr); ' +
+    'grid-template-rows:repeat(2, minmax(86px, 1fr)); gap:10px; padding:4px 20px;';
+  characterScreen.appendChild(csBody);
+
+  // 3x2 grid of thumb-sized tiles (min-height 86px per spec). Each tile is a
+  // big colour disc (the kart colour) with the character's initial, the
+  // name at >=16px, an absolute-positioned ✓ shown only when it's your own
+  // pick, and a TAKEN label shown only when the other connected slot holds
+  // it (mutually exclusive with ✓ — a tile is never both).
+  interface CharacterTile {
+    id: string;
+    button: HTMLButtonElement;
+    check: HTMLElement;
+    takenLabel: HTMLElement;
+  }
+  const characterTiles: CharacterTile[] = CHARACTERS.map((c) => {
+    const button = document.createElement('button');
+    button.style.cssText =
+      'position:relative; display:flex; flex-direction:column; align-items:center; ' +
+      'justify-content:center; gap:6px; min-height:86px; border-radius:16px; ' +
+      'border:3px solid transparent; background:rgba(255,255,255,0.08); color:#fff; ' +
+      'touch-action:manipulation; padding:6px;';
+    const hex = `#${c.kartColor.toString(16).padStart(6, '0')}`;
+    const disc = document.createElement('div');
+    disc.style.cssText =
+      `width:46px; height:46px; border-radius:50%; background:${hex}; display:flex; ` +
+      'align-items:center; justify-content:center; font-size:20px; font-weight:800; ' +
+      'color:rgba(0,0,0,0.55); border:2px solid rgba(255,255,255,0.5); flex:0 0 auto;';
+    disc.textContent = c.name.charAt(0).toUpperCase();
+    const label = document.createElement('div');
+    label.textContent = c.name;
+    label.style.cssText = 'font-size:16px; font-weight:700;';
+    const check = document.createElement('div');
+    check.textContent = '✓';
+    check.style.cssText =
+      'position:absolute; top:6px; right:10px; font-size:16px; font-weight:900; ' +
+      'color:#2ecc71; display:none;';
+    const takenLabel = document.createElement('div');
+    takenLabel.textContent = 'TAKEN';
+    takenLabel.style.cssText =
+      'font-size:10px; font-weight:800; letter-spacing:1px; color:#e74c3c; display:none;';
+    button.append(check, disc, label, takenLabel);
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      activeSocket?.sendSelect(c.id);
+    });
+    csBody.appendChild(button);
+    return { id: c.id, button, check, takenLabel };
+  });
+
+  let mySlot: PlayerSlot | null = null;
+  let latestPicks: RosterPick[] = [];
+
+  const csFooter = document.createElement('div');
+  csFooter.style.cssText =
+    'flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; ' +
+    'padding:14px 20px 18px;';
+  characterScreen.appendChild(csFooter);
+
+  const csYouLabel = document.createElement('div');
+  csYouLabel.style.cssText = 'font-size:14px; opacity:0.85;';
+  csFooter.appendChild(csYouLabel);
+
+  // Single START button, lives only here. Lobby is now the only state where
+  // characterScreen shows and raceOverlay is hidden entirely (see
+  // handleRaceEvent below), so there is no second START anywhere the user
+  // could see both at once.
+  const startBtn = document.createElement('button');
+  startBtn.textContent = 'START RACE';
+  startBtn.style.cssText =
+    'font-size:18px; font-weight:800; padding:14px 32px; border-radius:14px; border:none; ' +
+    'background:#27ae60; color:#fff;';
+  csFooter.appendChild(startBtn);
+
+  // Own pick highlighted (bright border + ✓); tiles the *other* connected
+  // slot currently holds are dimmed, labelled TAKEN and non-tappable. AI
+  // picks never appear here (those are resolved server-side only at
+  // countdown), so there's nothing to grey out on their account.
+  function renderCharacterTiles() {
+    const otherSlot: PlayerSlot | null = mySlot === 0 ? 1 : mySlot === 1 ? 0 : null;
+    const minePick = mySlot !== null ? latestPicks.find((p) => p.slot === mySlot)?.characterId ?? null : null;
+    const otherPick = otherSlot !== null ? latestPicks.find((p) => p.slot === otherSlot)?.characterId ?? null : null;
+    for (const tile of characterTiles) {
+      const taken = otherPick === tile.id;
+      const mine = minePick === tile.id;
+      tile.button.disabled = taken;
+      tile.button.style.opacity = taken ? '0.35' : '1';
+      tile.button.style.cursor = taken ? 'default' : 'pointer';
+      tile.button.style.borderColor = mine ? '#2ecc71' : 'transparent';
+      tile.button.style.background = mine ? 'rgba(46,204,113,0.18)' : 'rgba(255,255,255,0.08)';
+      tile.check.style.display = mine ? 'block' : 'none';
+      tile.takenLabel.style.display = taken ? 'block' : 'none';
+    }
+    const mineName = minePick ? CHARACTERS.find((c) => c.id === minePick)?.name ?? null : null;
+    csYouLabel.textContent = `You: ${mineName ?? '—'}`;
+  }
+
+  // The connection pill/RTT/slot badge (statusGroup, built near the top of
+  // this function) are one set of DOM nodes reused between the top bar and
+  // this screen's own header rather than duplicated ("reuse, don't
+  // duplicate state" per spec) — characterScreen is opaque and covers the
+  // top bar completely while shown, so the live status needs a visible home
+  // here instead. Moving them back on hide restores header's original
+  // (title, then statusGroup) child order, since header only ever holds
+  // those two nodes.
+  function showCharacterScreen() {
+    header.style.display = 'none';
+    csHeader.appendChild(statusGroup);
+    characterScreen.style.display = 'flex';
+  }
+
+  function hideCharacterScreen() {
+    characterScreen.style.display = 'none';
+    header.appendChild(statusGroup);
+    header.style.display = 'flex';
+  }
 
   // Portrait blocker: touch controls are landscape-only (§3.7).
   const portraitBlocker = document.createElement('div');
@@ -509,11 +583,10 @@ export function initControllerUI(root: HTMLElement) {
   startBtn.addEventListener('click', () => activeSocket?.sendEvent('start'));
   restartBtn.addEventListener('click', () => activeSocket?.sendEvent('restart'));
 
-  function showRaceOverlay(text: string, showStart: boolean, showRestart: boolean) {
+  function showRaceOverlay(text: string, showRestart: boolean) {
     raceOverlay.style.display = 'flex';
     raceStatusText.style.display = text ? 'block' : 'none';
     raceStatusText.textContent = text;
-    startBtn.style.display = showStart ? 'block' : 'none';
     restartBtn.style.display = showRestart ? 'block' : 'none';
   }
 
@@ -526,15 +599,21 @@ export function initControllerUI(root: HTMLElement) {
     navigator.vibrate?.(ms);
   }
 
+  // §Track D: lobby shows characterScreen and hides raceOverlay entirely
+  // (raceOverlay's old lobby state — status text + START — no longer
+  // exists; START now lives only in characterScreen's footer). Every other
+  // state shows raceOverlay and hides characterScreen, so the two full-
+  // screen surfaces are always mutually exclusive — never both, never
+  // neither once joined.
   function handleRaceEvent(name: EventName) {
     switch (name) {
       case 'lobby':
-        showRaceOverlay('', true, false);
-        showCharacterPanel();
+        hideRaceOverlay();
+        showCharacterScreen();
         break;
       case 'countdown':
-        showRaceOverlay('Get ready…', false, false);
-        hideCharacterPanel();
+        hideCharacterScreen();
+        showRaceOverlay('Get ready…', false);
         // One tick per second for the 3-2-1 countdown, approximated locally
         // (the game doesn't send a message per tick, only the countdown start).
         vibrate(30);
@@ -543,18 +622,18 @@ export function initControllerUI(root: HTMLElement) {
         break;
       case 'go':
         hideRaceOverlay();
-        hideCharacterPanel();
+        hideCharacterScreen();
         break;
       case 'paused':
-        showRaceOverlay('Paused', false, false);
-        hideCharacterPanel();
+        hideCharacterScreen();
+        showRaceOverlay('Paused', false);
         break;
       case 'finished':
-        showRaceOverlay('🏁 Finished!', false, true);
-        hideCharacterPanel();
+        hideCharacterScreen();
+        showRaceOverlay('🏁 Finished!', true);
         break;
       case 'restart':
-        break; // a 'lobby' event immediately follows and resets the overlay
+        break; // a 'lobby' event immediately follows and resets both screens
       case 'boost':
       case 'collision':
         vibrate(30);
@@ -596,13 +675,15 @@ export function initControllerUI(root: HTMLElement) {
           mySlot = slot;
           renderCharacterTiles();
           showPlay();
-          showRaceOverlay('', true, false); // default to the lobby/START state until an event says otherwise
-          showCharacterPanel();
-          // If we're (re)joining mid-race, the game immediately follows up with
-          // a slot-targeted event carrying its current RaceDirector state
-          // (main.ts's onPeer) — handleRaceEvent's switch then corrects the
-          // screen above (e.g. 'countdown'/'paused' hide the character panel).
-          // A genuine lobby join gets no such event, so this default stands.
+          // Default to the lobby screen (characterScreen) until an event says
+          // otherwise. If we're (re)joining mid-race, the game immediately
+          // follows up with a slot-targeted event carrying its current
+          // RaceDirector state (main.ts's onPeer) — handleRaceEvent's switch
+          // above then corrects the screen (e.g. 'countdown'/'paused' hide
+          // characterScreen and show raceOverlay instead). A genuine lobby
+          // join gets no such event, so this default stands.
+          hideRaceOverlay();
+          showCharacterScreen();
           wakeLock.start();
           // Tilt is the default steering mode; attempt it once per session,
           // falling back to touch (with a one-tap retry toast) if unavailable.
