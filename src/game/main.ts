@@ -150,6 +150,18 @@ function allActiveControllersFresh(now: number): boolean {
   return activeControllerAges(now).every((age) => age === null || age <= CONTROLLER_ABSENT_MS);
 }
 
+// Active human players whose controller is currently stale (keyboard-covered
+// players are never "stale") — feeds the slot-aware pause-overlay message.
+function staleActiveSlots(now: number): PlayerSlot[] {
+  return players
+    .filter((p) => p.active && !p.inputSource.isKeyboardActive(now))
+    .filter((p) => {
+      const age = p.inputSource.rawControllerAgeMs(now);
+      return age !== null && age > CONTROLLER_ABSENT_MS;
+    })
+    .map((p) => p.slot);
+}
+
 // Roster locks at the moment countdown begins (Phase 2b): P2 drives entity 1
 // for this race iff it's connected or driving via keyboard right now;
 // otherwise entity 1 runs as AI for the whole race, even if P2 joins mid-race.
@@ -594,7 +606,7 @@ startLoop(
         }
         break;
       case 'PAUSED':
-        hud.setPaused(true);
+        hud.setPaused(true, staleActiveSlots(now));
         break;
       case 'FINISHED':
         hud.hideCountdown();

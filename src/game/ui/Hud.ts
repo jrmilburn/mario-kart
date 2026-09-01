@@ -17,6 +17,8 @@ export class Hud {
   private divider: HTMLDivElement;
   private countdownEl: HTMLDivElement;
   private pausedOverlay: HTMLDivElement;
+  private pausedMessageEl: HTMLDivElement;
+  private pausedRestartEl: HTMLDivElement;
   private resultsPanel: HTMLDivElement;
   private resultsList: HTMLDivElement;
 
@@ -96,9 +98,14 @@ export class Hud {
 
     this.pausedOverlay = document.createElement('div');
     this.pausedOverlay.style.cssText =
-      'position:absolute; inset:0; display:none; align-items:center; justify-content:center; ' +
+      'position:absolute; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; ' +
       'background:rgba(0,0,0,0.6); font-size:24px; text-align:center; padding:0 40px;';
-    this.pausedOverlay.textContent = 'Controller disconnected — reconnect phone or press K for keyboard';
+    this.pausedMessageEl = document.createElement('div');
+    this.pausedOverlay.appendChild(this.pausedMessageEl);
+    this.pausedRestartEl = document.createElement('div');
+    this.pausedRestartEl.style.cssText = 'font-size:16px; opacity:0.8;';
+    this.pausedRestartEl.textContent = 'Or tap RESTART on a phone / press R to return to the lobby';
+    this.pausedOverlay.appendChild(this.pausedRestartEl);
     this.root.appendChild(this.pausedOverlay);
 
     this.resultsPanel = document.createElement('div');
@@ -181,8 +188,25 @@ export class Hud {
     this.countdownEl.style.display = 'none';
   }
 
-  setPaused(paused: boolean) {
+  // `staleSlots` names which active human players' controllers have gone
+  // stale (empty/omitted falls back to a generic message — e.g. solo play,
+  // where the caller doesn't bother tracking slots).
+  setPaused(paused: boolean, staleSlots: PlayerSlot[] = []) {
     this.pausedOverlay.style.display = paused ? 'flex' : 'none';
+    if (paused) this.pausedMessageEl.textContent = this.pausedMessage(staleSlots);
+  }
+
+  private pausedMessage(staleSlots: PlayerSlot[]): string {
+    if (staleSlots.length === 0) {
+      return 'Controller disconnected — reconnect phone or use WASD / arrow keys';
+    }
+    return staleSlots
+      .map((slot) =>
+        slot === 0
+          ? 'P1 controller disconnected — reconnect phone or use WASD'
+          : 'P2 controller disconnected — reconnect phone or use arrow keys',
+      )
+      .join(' · ');
   }
 
   // results: entries ordered by finish position (1st..last). `slot` is the

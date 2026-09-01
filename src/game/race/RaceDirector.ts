@@ -12,6 +12,8 @@ export interface RaceDirectorCallbacks {
 
 // LOBBY -> COUNTDOWN -> RACING -> FINISHED, with PAUSED interruptible from
 // COUNTDOWN/RACING on controller absence (§3.6) and FINISHED -> LOBBY on restart.
+// PAUSED -> LOBBY is also allowed on restart: a permanently-lost controller
+// (e.g. P2's phone dies) would otherwise strand the other player in PAUSED forever.
 export class RaceDirector {
   state: RaceState = 'LOBBY';
   countdownRemaining = 0;
@@ -34,7 +36,7 @@ export class RaceDirector {
   }
 
   requestRestart() {
-    if (this.state === 'FINISHED') {
+    if (this.state === 'FINISHED' || this.state === 'PAUSED') {
       this.setState('LOBBY');
       this.callbacks.onEvent?.('restart');
       this.callbacks.onEvent?.('lobby');

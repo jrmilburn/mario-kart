@@ -536,7 +536,7 @@ export function initControllerUI(root: HTMLElement) {
         onJoinError: (reason) => {
           showCodeEntry(
             reason === 'room-full'
-              ? 'That room already has a controller connected.'
+              ? 'Both player slots are taken.'
               : 'Room not found — check the code and try again.',
           );
         },
