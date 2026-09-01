@@ -39,4 +39,5 @@ export const TUNING = {
   tiltMaxAngleDeg: 35,
   tiltDeadzoneDeg: 2.5,
   tiltSmoothing: 0.25,
+  splitPixelRatioCap: 1.5, // devicePixelRatio cap while split-screen is active (2x draw calls, §Phase 2c)
 };

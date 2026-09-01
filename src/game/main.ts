@@ -4,6 +4,7 @@ import { GameSocket } from './net/GameSocket';
 import { type ControlState } from './input/InputSource';
 import { createPlayer, type Player } from './player/Player';
 import { Hud } from './ui/Hud';
+import { PlayerHud } from './ui/PlayerHud';
 import { Diagnostics } from './ui/Diagnostics';
 import { startLoop } from './core/loop';
 import { createKart, driftTier, kartForward, stepKart, type KartState } from './physics/Kart';
@@ -125,7 +126,7 @@ const entities: KartEntity[] = GRID.map((g, i) => {
     prevBoostTimer: 0,
   };
 });
-const player = entities[0]; // P1's entity — still the sole HUD/engine-audio/camera reference until Phase 2c
+const player = entities[0]; // P1's entity — shorthand kept for the shared/engine-audio bits that stay P1-only
 
 // Phase 2b: one Player per controller slot, each owning its own input source,
 // keymap, and camera rig. P1 always drives entity 0; P2 drives entity 1 only
@@ -155,6 +156,33 @@ function allActiveControllersFresh(now: number): boolean {
 function lockRoster() {
   const now = performance.now();
   players[1].active = players[1].connected || players[1].inputSource.isKeyboardActive(now);
+}
+
+// Split-screen (Phase 2c) mirrors the roster lock exactly: two active
+// players -> two half-screen viewports; one -> the original full-screen path.
+function isSplit(): boolean {
+  return players[0].active && players[1].active;
+}
+
+function applyCameraAspects(split: boolean) {
+  if (split) {
+    const halfAspect = window.innerWidth / 2 / window.innerHeight;
+    players[0].camera.aspect = halfAspect;
+    players[1].camera.aspect = halfAspect;
+  } else {
+    players[0].camera.aspect = window.innerWidth / window.innerHeight;
+  }
+  players[0].camera.updateProjectionMatrix();
+  players[1].camera.updateProjectionMatrix();
+}
+
+// Split-screen halves the GPU's effective resolution budget while doubling
+// draw/shadow passes, so the devicePixelRatio cap drops while split (§Phase 2c).
+function applyRendererSizing(split: boolean) {
+  const cap = split ? TUNING.splitPixelRatioCap : 2;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, cap));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  applyCameraAspects(split);
 }
 
 // §Phase 11 juice: pooled drift-spark particles, WebAudio engine hum, minimap.
@@ -274,24 +302,32 @@ function finalizeUnfinishedByProgress() {
   for (const e of unfinished) e.lapProgress.finishOrder = ++finishCounter;
 }
 
-window.addEventListener('resize', () => {
-  // Phase 2b: still solo full-screen (split-screen viewport/aspect handling
-  // lands in Phase 2c) — only P1's camera renders today.
-  players[0].camera.aspect = window.innerWidth / window.innerHeight;
-  players[0].camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+// The active human player driving this entity this race, if any (for results
+// P1/P2 highlighting, §Phase 2c).
+function slotForEntity(e: KartEntity): PlayerSlot | null {
+  const p = players.find((pl) => pl.active && entityFor(pl) === e);
+  return p ? p.slot : null;
+}
+
+window.addEventListener('resize', () => applyRendererSizing(isSplit()));
 
 // --- Networking + input --------------------------------------------------
 
 const hud = new Hud(app);
+// One PlayerHud per human seat (Phase 2c): P1's spans the full screen solo,
+// or the left half split; P2's stays hidden until it's actually racing.
+const playerHuds: [PlayerHud, PlayerHud] = [new PlayerHud(app), new PlayerHud(app)];
+playerHuds[1].setLayout('hidden');
 const diagnostics = new Diagnostics(app);
 let lastRttMs: number | null = null;
 
 const raceDirector = new RaceDirector({
   onEvent: (name) => socket.sendEvent(name), // broadcast to both controllers (no slot)
   onStateChange: (state) => {
-    if (state === 'LOBBY') resetRace();
+    if (state === 'LOBBY') {
+      resetRace();
+      players[1].active = false; // re-locked fresh by lockRoster() at the next countdown
+    }
     if (state === 'COUNTDOWN') lockRoster();
   },
 });
@@ -305,8 +341,7 @@ const socket = new GameSocket({
   onPeer: (event, slot) => {
     const s = slot ?? 0;
     players[s].connected = event === 'controller-joined';
-    if (event === 'controller-joined') hud.setPeerConnected(true);
-    else hud.setPeerConnected(false);
+    hud.setPeerStatus(s, players[s].connected);
   },
   onInput: (snapshot) => {
     const slot = snapshot.slot ?? 0;
@@ -331,6 +366,7 @@ window.addEventListener('keydown', (e) => {
 // --- Fixed-timestep physics + rAF render ----------------------------------
 
 let lastRenderTime = performance.now();
+let lastSplitState: boolean | null = null; // forces the first frame to apply sizing/layout
 
 startLoop(
   (dt) => {
@@ -470,13 +506,20 @@ startLoop(
     lastRenderTime = now;
 
     for (const e of entities) updateKartVisual(e.visual, e.kart, renderDt);
-    // Phase 2b: still solo full-screen — split-screen rendering with both
-    // players' cameras lands in Phase 2c.
-    players[0].followCamera.update(player.kart, renderDt);
 
-    const driftActive = player.kart.drift.phase === 'active';
-    const maxTierTime = TUNING.driftTierTimes[TUNING.driftTierTimes.length - 1];
-    hud.setDriftCharge(driftActive, driftTier(player.kart.drift.charge), player.kart.drift.charge / maxTierTime);
+    // Split-screen layout/sizing only needs to change when the roster lock
+    // (isSplit) actually flips — not recomputed every frame (§Phase 2c).
+    const split = isSplit();
+    if (split !== lastSplitState) {
+      lastSplitState = split;
+      applyRendererSizing(split);
+      hud.setSplit(split);
+      playerHuds[0].setLayout(split ? 'left' : 'solo');
+      playerHuds[1].setLayout(split ? 'right' : 'hidden');
+    }
+
+    players[0].followCamera.update(entityFor(players[0]).kart, renderDt);
+    if (split) players[1].followCamera.update(entityFor(players[1]).kart, renderDt);
 
     // §Phase 11a/b: drift sparks tinted by tier, engine pitch mapped to speed.
     for (const e of entities) {
@@ -487,9 +530,15 @@ startLoop(
       driftSparks.emit(sparkPos, driftTier(e.kart.drift.charge));
     }
     driftSparks.update(renderDt);
-    engineAudio.setSpeed(Math.abs(player.kart.speed) / TUNING.topSpeed);
+    engineAudio.setSpeed(Math.abs(player.kart.speed) / TUNING.topSpeed); // engine audio stays P1-only by design
 
-    minimap.update(entities.map((e) => ({ pos: e.kart.pos, color: e.colorHex, isPlayer: e === player })));
+    // Minimap stays one shared instance; both active human dots get the
+    // bigger highlighted treatment, distinguished from each other by their
+    // own kart color (§Phase 2c).
+    const activeHumanEntities = new Set(players.filter((p) => p.active).map((p) => entityFor(p)));
+    minimap.update(
+      entities.map((e) => ({ pos: e.kart.pos, color: e.colorHex, isPlayer: activeHumanEntities.has(e) })),
+    );
 
     // Item box visuals: rotate continuously, hide while respawning.
     itemBoxes.forEach((box, i) => {
@@ -502,12 +551,21 @@ startLoop(
     syncProjectileVisuals(bananas, bananaVisuals, buildBananaMesh, scene);
     syncProjectileVisuals(shells, shellVisuals, buildShellMesh, scene);
 
-    const playerHeldDisplay =
-      player.itemState.rouletteTimer > 0 ? player.itemState.rouletteDisplay : player.itemState.item;
-    hud.setHeldItem(playerHeldDisplay);
-
     const ranked = [...entities].sort(comparePosition);
-    const playerPosition = ranked.indexOf(player) + 1;
+    const maxTierTime = TUNING.driftTierTimes[TUNING.driftTierTimes.length - 1];
+
+    // Per-player readouts (Phase 2c): drift bar + item slot update every
+    // frame regardless of race state, same as the pre-split-screen behavior;
+    // lap/pos/speed is gated by race state below.
+    for (const p of players) {
+      if (!p.active) continue;
+      const e = entityFor(p);
+      const ph = playerHuds[p.slot];
+      const driftActive = e.kart.drift.phase === 'active';
+      ph.setDriftCharge(driftActive, driftTier(e.kart.drift.charge), e.kart.drift.charge / maxTierTime);
+      const heldDisplay = e.itemState.rouletteTimer > 0 ? e.itemState.rouletteDisplay : e.itemState.item;
+      ph.setHeldItem(heldDisplay);
+    }
 
     switch (raceDirector.state) {
       case 'LOBBY':
@@ -515,7 +573,7 @@ startLoop(
         hud.hideCountdown();
         hud.setPaused(false);
         hud.hideResults();
-        hud.hideRaceInfo();
+        for (const ph of playerHuds) ph.hideRaceInfo();
         break;
       case 'COUNTDOWN':
         hud.hideLobby();
@@ -528,7 +586,12 @@ startLoop(
         hud.hideCountdown();
         hud.setPaused(false);
         hud.hideResults();
-        hud.setRaceInfo(player.lapProgress.lap, TOTAL_LAPS, player.kart.speed * 3.6, playerPosition, entities.length);
+        for (const p of players) {
+          if (!p.active) continue;
+          const e = entityFor(p);
+          const position = ranked.indexOf(e) + 1;
+          playerHuds[p.slot].setRaceInfo(e.lapProgress.lap, TOTAL_LAPS, e.kart.speed * 3.6, position, entities.length);
+        }
         break;
       case 'PAUSED':
         hud.setPaused(true);
@@ -536,7 +599,7 @@ startLoop(
       case 'FINISHED':
         hud.hideCountdown();
         hud.setPaused(false);
-        hud.showResults(ranked.map((e) => ({ name: e.name, isPlayer: e === player })));
+        hud.showResults(ranked.map((e) => ({ name: e.name, slot: slotForEntity(e) })));
         break;
     }
 
@@ -554,6 +617,20 @@ startLoop(
       stepsThisFrame,
     });
 
-    renderer.render(scene, players[0].camera);
+    if (split) {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const halfW = Math.floor(w / 2);
+      renderer.setScissorTest(true);
+      renderer.setViewport(0, 0, halfW, h);
+      renderer.setScissor(0, 0, halfW, h);
+      renderer.render(scene, players[0].camera);
+      renderer.setViewport(halfW, 0, w - halfW, h);
+      renderer.setScissor(halfW, 0, w - halfW, h);
+      renderer.render(scene, players[1].camera);
+      renderer.setScissorTest(false);
+    } else {
+      renderer.render(scene, players[0].camera);
+    }
   },
 );

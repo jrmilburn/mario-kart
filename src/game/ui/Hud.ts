@@ -1,23 +1,20 @@
 import QRCode from 'qrcode';
 import type { ConnectionStatus } from '../net/GameSocket';
-import type { SteerMode } from '../../shared/protocol';
-import type { ItemType } from '../items/ItemSystem';
+import type { PlayerSlot, SteerMode } from '../../shared/protocol';
 
-const ITEM_ICONS: Record<ItemType, string> = { mushroom: '🍄', banana: '🍌', shell: '🐚' };
-
+// Shared chrome only (Phase 2c) — per-player race readouts (lap/pos/speed,
+// drift bar, item slot) live in PlayerHud.ts, one instance per human player.
 export class Hud {
   private root: HTMLDivElement;
   private pill: HTMLDivElement;
   private lobbyPanel: HTMLDivElement;
   private codeEl: HTMLDivElement;
   private qrCanvas: HTMLCanvasElement;
-  private peerEl: HTMLDivElement;
+  private p1PeerEl: HTMLDivElement;
+  private p2PeerEl: HTMLDivElement;
   private kbBadge: HTMLDivElement;
   private steerModeBadge: HTMLDivElement;
-  private itemSlot: HTMLDivElement;
-  private driftBar: HTMLDivElement;
-  private driftFill: HTMLDivElement;
-  private raceInfo: HTMLDivElement;
+  private divider: HTMLDivElement;
   private countdownEl: HTMLDivElement;
   private pausedOverlay: HTMLDivElement;
   private resultsPanel: HTMLDivElement;
@@ -48,21 +45,12 @@ export class Hud {
       'font-size:13px; font-weight:700; background:#2c3e50; display:none;';
     this.root.appendChild(this.steerModeBadge);
 
-    this.driftBar = document.createElement('div');
-    this.driftBar.style.cssText =
-      'position:absolute; left:50%; bottom:24px; transform:translateX(-50%); width:180px; height:12px; ' +
-      'border-radius:6px; background:rgba(0,0,0,0.4); overflow:hidden; display:none;';
-    this.driftFill = document.createElement('div');
-    this.driftFill.style.cssText = 'height:100%; width:0%; background:#3498db; transition:background 0.1s;';
-    this.driftBar.appendChild(this.driftFill);
-    this.root.appendChild(this.driftBar);
-
-    this.itemSlot = document.createElement('div');
-    this.itemSlot.style.cssText =
-      'position:absolute; top:52px; left:12px; width:56px; height:56px; border-radius:12px; ' +
-      'background:rgba(0,0,0,0.4); border:2px solid rgba(255,255,255,0.4); display:none; ' +
-      'align-items:center; justify-content:center; font-size:30px;';
-    this.root.appendChild(this.itemSlot);
+    // 2px center divider, shown only while split-screen is active (§Phase 2c).
+    this.divider = document.createElement('div');
+    this.divider.style.cssText =
+      'position:absolute; left:50%; top:0; bottom:0; width:2px; margin-left:-1px; ' +
+      'background:rgba(255,255,255,0.35); display:none; z-index:2;';
+    this.root.appendChild(this.divider);
 
     this.lobbyPanel = document.createElement('div');
     this.lobbyPanel.style.cssText =
@@ -82,17 +70,23 @@ export class Hud {
     this.codeEl.style.cssText = 'font-size:72px; font-weight:700; letter-spacing:8px;';
     this.lobbyPanel.appendChild(this.codeEl);
 
-    this.peerEl = document.createElement('div');
-    this.peerEl.style.cssText =
-      'font-size:14px; padding:6px 16px; border-radius:999px; background:#c0392b;';
-    this.peerEl.textContent = 'Waiting for phone…';
-    this.lobbyPanel.appendChild(this.peerEl);
+    // P1 is required (red until connected); P2 is an optional second seat
+    // (neutral gray until connected) — the same QR/room code joins either slot.
+    const peerRow = document.createElement('div');
+    peerRow.style.cssText = 'display:flex; flex-direction:column; gap:6px; align-items:center;';
+    this.lobbyPanel.appendChild(peerRow);
 
-    this.raceInfo = document.createElement('div');
-    this.raceInfo.style.cssText =
-      'position:absolute; top:12px; left:12px; font-size:22px; font-weight:700; ' +
-      'text-shadow:0 2px 6px rgba(0,0,0,0.6); display:none;';
-    this.root.appendChild(this.raceInfo);
+    this.p1PeerEl = document.createElement('div');
+    this.p1PeerEl.style.cssText =
+      'font-size:14px; padding:6px 16px; border-radius:999px; background:#c0392b;';
+    this.p1PeerEl.textContent = 'P1: waiting for phone…';
+    peerRow.appendChild(this.p1PeerEl);
+
+    this.p2PeerEl = document.createElement('div');
+    this.p2PeerEl.style.cssText =
+      'font-size:14px; padding:6px 16px; border-radius:999px; background:#7f8c8d;';
+    this.p2PeerEl.textContent = 'P2: scan to join (optional)';
+    peerRow.appendChild(this.p2PeerEl);
 
     this.countdownEl = document.createElement('div');
     this.countdownEl.style.cssText =
@@ -140,9 +134,16 @@ export class Hud {
     this.pill.style.background = color;
   }
 
-  setPeerConnected(connected: boolean) {
-    this.peerEl.textContent = connected ? 'Phone connected ✓' : 'Waiting for phone…';
-    this.peerEl.style.background = connected ? '#27ae60' : '#c0392b';
+  // Lobby-only per-slot connection status (Phase 2c) — the same QR/room code
+  // joins either slot; the server assigns whichever is free.
+  setPeerStatus(slot: PlayerSlot, connected: boolean) {
+    if (slot === 0) {
+      this.p1PeerEl.textContent = connected ? 'P1 connected ✓' : 'P1: waiting for phone…';
+      this.p1PeerEl.style.background = connected ? '#27ae60' : '#c0392b';
+    } else {
+      this.p2PeerEl.textContent = connected ? 'P2 connected ✓' : 'P2: scan to join (optional)';
+      this.p2PeerEl.style.background = connected ? '#27ae60' : '#7f8c8d';
+    }
   }
 
   setKeyboardActive(active: boolean) {
@@ -158,23 +159,9 @@ export class Hud {
     this.steerModeBadge.textContent = mode.toUpperCase();
   }
 
-  // tier: 0 (charging, below tier 1) .. 3. progress: 0..1 toward the max tier threshold.
-  setDriftCharge(active: boolean, tier: number, progress: number) {
-    this.driftBar.style.display = active ? 'block' : 'none';
-    if (!active) return;
-    const colors = ['#7f8c8d', '#3498db', '#e67e22', '#9b59b6']; // gray, blue, orange, purple
-    this.driftFill.style.background = colors[Math.min(tier, colors.length - 1)];
-    this.driftFill.style.width = `${Math.round(Math.min(Math.max(progress, 0), 1) * 100)}%`;
-  }
-
-  // display: the item to show (flickers during roulette, locks once held.item is set).
-  setHeldItem(display: ItemType | null) {
-    if (!display) {
-      this.itemSlot.style.display = 'none';
-      return;
-    }
-    this.itemSlot.style.display = 'flex';
-    this.itemSlot.textContent = ITEM_ICONS[display];
+  // Shown only while two players are actively racing split-screen (§Phase 2c).
+  setSplit(split: boolean) {
+    this.divider.style.display = split ? 'block' : 'none';
   }
 
   hideLobby() {
@@ -183,17 +170,6 @@ export class Hud {
 
   showLobby() {
     this.lobbyPanel.style.display = 'flex';
-  }
-
-  setRaceInfo(lap: number, totalLaps: number, speedKmh: number, position: number, totalKarts: number) {
-    this.raceInfo.style.display = 'block';
-    this.raceInfo.textContent =
-      `LAP ${Math.min(lap + 1, totalLaps)}/${totalLaps}   ` +
-      `POS ${position}/${totalKarts}   ${Math.round(speedKmh)} km/h`;
-  }
-
-  hideRaceInfo() {
-    this.raceInfo.style.display = 'none';
   }
 
   showCountdown(text: string) {
@@ -209,14 +185,20 @@ export class Hud {
     this.pausedOverlay.style.display = paused ? 'flex' : 'none';
   }
 
-  // results: entries ordered by finish position (1st..last).
-  showResults(results: Array<{ name: string; isPlayer: boolean }>) {
+  // results: entries ordered by finish position (1st..last). `slot` is the
+  // human player driving that kart (highlighted P1/P2), null for AI (§Phase 2c).
+  showResults(results: Array<{ name: string; slot: PlayerSlot | null }>) {
     this.resultsPanel.style.display = 'flex';
     this.resultsList.innerHTML = '';
+    const SLOT_COLORS: Record<PlayerSlot, string> = { 0: '#ff6b35', 1: '#3498db' };
     results.forEach((r, i) => {
       const row = document.createElement('div');
-      row.textContent = `${i + 1}. ${r.name}`;
-      if (r.isPlayer) row.style.fontWeight = '800';
+      const label = r.slot === 0 ? ' (P1)' : r.slot === 1 ? ' (P2)' : '';
+      row.textContent = `${i + 1}. ${r.name}${label}`;
+      if (r.slot !== null) {
+        row.style.fontWeight = '800';
+        row.style.color = SLOT_COLORS[r.slot];
+      }
       this.resultsList.appendChild(row);
     });
   }
