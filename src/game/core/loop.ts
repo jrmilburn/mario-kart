@@ -2,7 +2,7 @@ const FIXED_DT = 1 / 60;
 const MAX_FRAME_DT = 0.1; // 100ms clamp -> at most 6 catch-up steps, then time is dropped
 
 export type UpdateFn = (dt: number) => void;
-export type RenderFn = (alpha: number) => void;
+export type RenderFn = (alpha: number, stepsThisFrame: number) => void;
 
 // Fixed 60Hz accumulator: physics is framerate-independent, render runs on rAF.
 // Physics is frozen entirely while the tab is hidden (D.. §6 "frame drops breaking physics").
@@ -26,12 +26,14 @@ export function startLoop(update: UpdateFn, render: RenderFn) {
     lastTime = now;
     accumulator += frameDt;
 
+    let steps = 0;
     while (accumulator >= FIXED_DT) {
       update(FIXED_DT);
       accumulator -= FIXED_DT;
+      steps++;
     }
 
-    render(accumulator / FIXED_DT);
+    render(accumulator / FIXED_DT, steps);
   }
 
   requestAnimationFrame(frame);

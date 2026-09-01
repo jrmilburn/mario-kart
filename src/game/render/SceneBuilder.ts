@@ -11,11 +11,12 @@ export interface KartVisual {
 }
 
 // One large flat plane beneath everything (§3.1) for far-field coverage beyond
-// the modeled grass ribbon around the track.
+// the modeled grass ribbon around the track. Color matches the grass ribbon
+// (TrackBuilder) for a seamless blend at the horizon.
 export function buildGround(scene: THREE.Scene) {
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(1000, 1000),
-    new THREE.MeshLambertMaterial({ color: 0x3d6b32 }),
+    new THREE.MeshLambertMaterial({ color: 0x4a9c3f }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.05;
@@ -23,8 +24,8 @@ export function buildGround(scene: THREE.Scene) {
 }
 
 export function buildLights(scene: THREE.Scene) {
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
-  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x4a6b3a, 1.2));
+  const dir = new THREE.DirectionalLight(0xfff3d6, 0.9);
   dir.position.set(5, 10, 5);
   scene.add(dir);
 }

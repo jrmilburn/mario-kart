@@ -124,7 +124,7 @@ function buildGrassMesh(samples: TrackSample[]): THREE.Mesh {
   const colors: number[] = [];
   const indices: number[] = [];
 
-  const baseGreen = new THREE.Color(0x4d8a3d);
+  const baseGreen = new THREE.Color(0x5cb85c);
 
   // Two ribbons (left ROAD_HALF..GRASS_HALF, right ROAD_HALF..GRASS_HALF), 2 verts each per sample.
   for (let i = 0; i < n; i++) {
@@ -235,7 +235,7 @@ function buildStartFinish(sample0: TrackSample): THREE.Group {
     new THREE.MeshBasicMaterial({ map: buildCheckerTexture() }),
   );
   quad.rotation.x = -Math.PI / 2;
-  quad.rotation.z = -Math.atan2(right.x, right.z) + Math.PI / 2;
+  quad.rotation.z = Math.atan2(forward.x, forward.z);
   quad.position.copy(pos).add(new THREE.Vector3(0, 0.01, 0));
   group.add(quad);
 
@@ -257,8 +257,84 @@ function buildStartFinish(sample0: TrackSample): THREE.Group {
   const beam = new THREE.Mesh(beamGeo, beamMat);
   beam.position.copy(pos);
   beam.position.y = 5;
-  beam.rotation.y = Math.atan2(forward.x, forward.z) + Math.PI / 2;
+  beam.rotation.y = Math.atan2(forward.x, forward.z);
   group.add(beam);
+
+  return group;
+}
+
+// Trackside dressing (§Phase 9): cones, low-poly trees, and floating ring
+// gates, all InstancedMesh so the prop count never adds more than a handful
+// of draw calls regardless of how many are placed.
+const START_CLEARANCE_SAMPLES = 10; // keep props away from the start arch
+
+function buildTracksideProps(samples: TrackSample[]): THREE.Group {
+  const group = new THREE.Group();
+  const n = samples.length;
+  const isNearStart = (i: number) => Math.min(i, n - i) < START_CLEARANCE_SAMPLES;
+
+  // Trees: trunk + cone top, alternating sides, every ~23m.
+  const treeIndices: number[] = [];
+  for (let i = 0; i < n; i += 15) if (!isNearStart(i)) treeIndices.push(i);
+
+  const trunkGeo = new THREE.CylinderGeometry(0.15, 0.2, 1.2, 6);
+  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4423 });
+  const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, treeIndices.length);
+
+  const topGeo = new THREE.ConeGeometry(0.9, 2.2, 7);
+  const topMat = new THREE.MeshLambertMaterial({ color: 0x2f8f3f });
+  const topMesh = new THREE.InstancedMesh(topGeo, topMat, treeIndices.length);
+
+  const m = new THREE.Matrix4();
+  treeIndices.forEach((idx, i) => {
+    const side = i % 2 === 0 ? 1 : -1;
+    const sample = samples[idx];
+    const offset = GRASS_HALF + 3 + (i % 3);
+    const pos = sample.pos.clone().addScaledVector(sample.right, side * offset);
+    m.makeTranslation(pos.x, 0.6, pos.z);
+    trunkMesh.setMatrixAt(i, m);
+    m.makeTranslation(pos.x, 1.2 + 1.1, pos.z);
+    topMesh.setMatrixAt(i, m);
+  });
+  trunkMesh.instanceMatrix.needsUpdate = true;
+  topMesh.instanceMatrix.needsUpdate = true;
+  group.add(trunkMesh, topMesh);
+
+  // Cones: single-piece, closer to the road, every ~15.5m.
+  const coneIndices: number[] = [];
+  for (let i = 0; i < n; i += 10) if (!isNearStart(i)) coneIndices.push(i);
+
+  const coneGeo = new THREE.ConeGeometry(0.4, 1.0, 8);
+  const coneMat = new THREE.MeshLambertMaterial({ color: 0xff7f11 });
+  const coneMesh = new THREE.InstancedMesh(coneGeo, coneMat, coneIndices.length);
+  coneIndices.forEach((idx, i) => {
+    const side = i % 2 === 0 ? -1 : 1;
+    const sample = samples[idx];
+    const pos = sample.pos.clone().addScaledVector(sample.right, side * (ROAD_HALF + 1.5));
+    m.makeTranslation(pos.x, 0.5, pos.z);
+    coneMesh.setMatrixAt(i, m);
+  });
+  coneMesh.instanceMatrix.needsUpdate = true;
+  group.add(coneMesh);
+
+  // Floating ring gates: centered on the road, spanning it like a hoop, every ~78m.
+  const ringIndices: number[] = [];
+  for (let i = 0; i < n; i += 50) ringIndices.push(i);
+
+  const ringGeo = new THREE.TorusGeometry(2.2, 0.22, 8, 16);
+  const ringMat = new THREE.MeshLambertMaterial({ color: 0xffd23f });
+  const ringMesh = new THREE.InstancedMesh(ringGeo, ringMat, ringIndices.length);
+  const ringAxis = new THREE.Vector3(0, 0, 1); // TorusGeometry's hole runs along local Z
+  const quat = new THREE.Quaternion();
+  ringIndices.forEach((idx, i) => {
+    const sample = samples[idx];
+    const pos = sample.pos.clone().add(new THREE.Vector3(0, 3, 0));
+    quat.setFromUnitVectors(ringAxis, sample.forward);
+    m.compose(pos, quat, new THREE.Vector3(1, 1, 1));
+    ringMesh.setMatrixAt(i, m);
+  });
+  ringMesh.instanceMatrix.needsUpdate = true;
+  group.add(ringMesh);
 
   return group;
 }
@@ -276,6 +352,7 @@ export function buildTrack(): TrackData {
   group.add(buildGrassMesh(samples));
   group.add(buildWallMeshes(samples));
   group.add(buildStartFinish(samples[checkpoints[0]]));
+  group.add(buildTracksideProps(samples));
 
   return { samples, totalLength, checkpoints, group };
 }

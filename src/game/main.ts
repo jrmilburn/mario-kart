@@ -32,8 +32,8 @@ interface KartEntity {
 const app = document.getElementById('app')!;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb); // sky blue
-scene.fog = new THREE.Fog(0x87ceeb, 60, 220);
+scene.background = new THREE.Color(0x6ec6ff); // bright cheerful sky blue
+scene.fog = new THREE.Fog(0x6ec6ff, 70, 260);
 
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
 
@@ -252,7 +252,7 @@ startLoop(
       }
     }
   },
-  () => {
+  (_alpha, stepsThisFrame) => {
     diagnostics.tickFrame();
 
     const now = performance.now();
@@ -311,6 +311,7 @@ startLoop(
       raceState: raceDirector.state,
       lap: player.lapProgress.lap,
       nextCheckpoint: player.lapProgress.nextCheckpoint,
+      stepsThisFrame,
     });
 
     renderer.render(scene, camera);
