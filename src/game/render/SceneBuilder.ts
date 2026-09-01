@@ -9,6 +9,7 @@ export interface KartVisual {
   body: THREE.Mesh; // gets the drift-lean roll
   frontWheelPivots: THREE.Group[]; // steer-yawed independently of body lean
   leanAngle: number; // smoothed drift-lean state, mutated by updateKartVisual
+  pitchAngle: number; // §Phase 5 item 5: smoothed slope-pitch state, mutated by updateKartVisual
   // §Phase 3: seat anchor for the driver (GLTF model or procedural fallback).
   // Parented under `body` (not `group`) so it inherits the existing drift-lean
   // roll (visual.body.rotation.z, set in updateKartVisual) for free — the
@@ -133,7 +134,7 @@ export function buildKart(def: CharacterDef): KartVisual {
   // §Phase 4 item 3: no more flat blob shadow mesh — real shadow maps replace
   // it (buildLights/updateLightTarget), and karts cast a real shadow via
   // body.castShadow/wheel castShadow above and the driver traversal in setDriver.
-  const visual: KartVisual = { group, body, frontWheelPivots, leanAngle: 0, driverAnchor };
+  const visual: KartVisual = { group, body, frontWheelPivots, leanAngle: 0, pitchAngle: 0, driverAnchor };
   setDriver(visual, def, null); // seed the fallback immediately; caller swaps in the real model once loaded
   return visual;
 }
@@ -222,18 +223,27 @@ function buildFallbackDriver(colors: CharacterFallbackColors): THREE.Group {
 }
 
 const LEAN_BLEND_RATE = 1 / 0.15; // blend the drift lean in/out over ~0.15s
+const PITCH_BLEND_RATE = 8; // §Phase 5 item 5: smooth the slope-pitch visual over ~0.125s
 const FRONT_WHEEL_YAW_SCALE = 0.4;
 
 // Sets kart visuals from physics state each render frame (§3.2 closing paragraph):
 // body yaw = heading + drift lean, blended in/out over 0.15s; front wheels
-// yawed by steerActual x 0.4, independent of the body lean.
-export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number) {
+// yawed by steerActual x 0.4, independent of the body lean. `grade` (§Phase 5
+// item 5, forward.y of the sample nearest the kart -- caller reuses whatever
+// nearestSample query it already made this tick, not a second one) pitches
+// the whole group nose-up/down to match the local slope, smoothed like the
+// drift lean so pitch changes don't pop across sample boundaries.
+export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number, grade = 0) {
   visual.group.position.copy(kart.pos);
   visual.group.rotation.y = kart.heading;
 
   const targetLean = kart.drift.phase === 'active' ? kart.drift.dir * 0.25 : 0;
   visual.leanAngle = damp(visual.leanAngle, targetLean, LEAN_BLEND_RATE, dt);
   visual.body.rotation.z = visual.leanAngle;
+
+  const targetPitch = -Math.asin(clamp(grade, -1, 1));
+  visual.pitchAngle = damp(visual.pitchAngle, targetPitch, PITCH_BLEND_RATE, dt);
+  visual.group.rotation.x = visual.pitchAngle;
 
   for (const pivot of visual.frontWheelPivots) {
     pivot.rotation.y = kart.steerActual * FRONT_WHEEL_YAW_SCALE;

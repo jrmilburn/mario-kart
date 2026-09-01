@@ -27,14 +27,18 @@ export interface Player {
 // human-capable-only, exactly matching v1's single-player behavior. P2 (slot
 // 1) starts inactive; RaceDirector's countdown lock decides whether it drives
 // entity 1 for the upcoming race (see main.ts's roster-lock logic).
-export function createPlayer(slot: PlayerSlot, entityIndex: number): Player {
+export function createPlayer(
+  slot: PlayerSlot,
+  entityIndex: number,
+  groundHeightAt: (pos: THREE.Vector3) => number,
+): Player {
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
   return {
     slot,
     entityIndex,
     inputSource: new InputSource(KEYMAP_BY_SLOT[slot]),
     camera,
-    followCamera: new FollowCamera(camera),
+    followCamera: new FollowCamera(camera, groundHeightAt),
     connected: false,
     active: slot === 0,
   };

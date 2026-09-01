@@ -148,9 +148,14 @@ function spinOut(kart: KartState) {
   kart.drift.charge = 0;
 }
 
-export function updateBananas(bananas: Banana[], karts: KartState[]) {
+// §Phase 5 item 7: `groundHeightAt` re-snaps each stationary banana's y to the
+// track height under it every tick -- it doesn't move once dropped, but the
+// spot it landed on can still be sloped, and its initial y (copied from the
+// dropping kart's pos at throw time) is only an approximation of that.
+export function updateBananas(bananas: Banana[], karts: KartState[], groundHeightAt: (pos: THREE.Vector3) => number) {
   for (let i = bananas.length - 1; i >= 0; i--) {
     const banana = bananas[i];
+    banana.pos.y = groundHeightAt(banana.pos);
     for (const kart of karts) {
       if (kart.spinTimer > 0) continue;
       if (kart.pos.distanceTo(banana.pos) < BANANA_RADIUS) {

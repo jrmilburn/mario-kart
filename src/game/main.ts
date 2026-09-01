@@ -50,10 +50,12 @@ import {
 import { DriftSparks } from './render/DriftSparks';
 import { EngineAudio } from './audio/EngineAudio';
 import { Minimap } from './ui/Minimap';
+import { damp } from '../shared/mathUtils';
 
 const NEUTRAL_CONTROL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0, item: 0 };
 const PLAYER_FINISH_DELAY_SECONDS = 1.5;
 const COLLISION_HAPTIC_COOLDOWN_SECONDS = 0.3; // avoid vibration spam while wall-scraping
+const GROUND_FOLLOW_RATE = 20; // §Phase 5 item 4: exponential damp rate for kart.pos.y -> track height
 
 interface KartEntity {
   kart: KartState;
@@ -70,6 +72,11 @@ interface KartEntity {
   // independent cooldown/edge tracking instead of one pair of module-scope vars).
   collisionHapticCooldown: number;
   prevBoostTimer: number;
+  // §Phase 5 item 5: local track grade at this kart's position, refreshed by
+  // the ground-follow step each physics tick and consumed by updateKartVisual
+  // in the render loop -- reuses that tick's groundHeightAt query instead of
+  // taking a second one just for the pitch visual.
+  grade: number;
   // §Phase 3: which character this entity currently shows. `driverRequestId`
   // guards the async model load in loadDriverFor — bumped on every
   // applyCharacterToEntity call so a slow-resolving load for a character this
@@ -179,6 +186,7 @@ const entities: KartEntity[] = GRID.map((g, i) => {
     colorHex: characterColorHex(def),
     collisionHapticCooldown: 0,
     prevBoostTimer: 0,
+    grade: 0,
     characterId: def.id,
     driverRequestId: 0,
   };
@@ -190,7 +198,8 @@ const player = entities[0]; // P1's entity — shorthand kept for the shared/eng
 // Phase 2b: one Player per controller slot, each owning its own input source,
 // keymap, and camera rig. P1 always drives entity 0; P2 drives entity 1 only
 // when active (see lockRoster) — otherwise entity 1 races as AI.
-const players: [Player, Player] = [createPlayer(0, 0), createPlayer(1, 1)];
+const groundHeightAt = (pos: THREE.Vector3) => trackQuery.groundHeightAt(pos);
+const players: [Player, Player] = [createPlayer(0, 0, groundHeightAt), createPlayer(1, 1, groundHeightAt)];
 for (const p of players) p.inputSource.attachKeyboard();
 
 function entityFor(p: Player): KartEntity {
@@ -359,6 +368,7 @@ function resetRace() {
     e.prevItemInput = 0;
     e.collisionHapticCooldown = 0;
     e.prevBoostTimer = 0;
+    e.grade = 0;
   }
   for (const box of itemBoxes) {
     box.active = true;
@@ -594,8 +604,22 @@ startLoop(
       dt,
     );
 
+    // §Phase 5 item 4: ground-follow, after stepping + both collision passes
+    // have settled this tick's x/z position. `stepKart` never touches pos.y
+    // itself (design principle: physics stays 2D-projected) -- y is assigned
+    // here from the track height under the kart's final x/z, damped rather
+    // than snapped so a kart driving off a ledge or through a bump doesn't
+    // teleport vertically. The same query's `grade` is stashed on the entity
+    // for updateKartVisual's pitch in the render loop (§Phase 5 item 5) so
+    // that doesn't need a second nearestSample call.
+    for (const e of entities) {
+      const groundSample = trackQuery.nearestSample(e.kart.pos);
+      e.kart.pos.y = damp(e.kart.pos.y, groundSample.groundY, GROUND_FOLLOW_RATE, dt);
+      e.grade = groundSample.grade;
+    }
+
     if (racing) {
-      updateBananas(bananas, entities.map((e) => e.kart));
+      updateBananas(bananas, entities.map((e) => e.kart), groundHeightAt);
       updateShells(shells, entities.map((e) => e.kart), track.samples, track.totalLength, dt);
     }
 
@@ -651,7 +675,7 @@ startLoop(
     const renderDt = Math.min((now - lastRenderTime) / 1000, 0.1);
     lastRenderTime = now;
 
-    for (const e of entities) updateKartVisual(e.visual, e.kart, renderDt);
+    for (const e of entities) updateKartVisual(e.visual, e.kart, renderDt, e.grade);
 
     // Split-screen layout/sizing only needs to change when the roster lock
     // (isSplit) actually flips — not recomputed every frame (§Phase 2c).
@@ -694,7 +718,7 @@ startLoop(
       if (e.kart.drift.phase !== 'active') continue;
       const rearOffset = kartForward(e.kart.heading).multiplyScalar(-1);
       const sparkPos = e.kart.pos.clone().addScaledVector(rearOffset, 1.0);
-      sparkPos.y = 0.3;
+      sparkPos.y = e.kart.pos.y + 0.3; // §Phase 5: relative to local track height, not an absolute world y
       driftSparks.emit(sparkPos, driftTier(e.kart.drift.charge));
     }
     driftSparks.update(renderDt);
