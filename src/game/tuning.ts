@@ -41,4 +41,5 @@ export const TUNING = {
   tiltSmoothing: 0.25,
   splitPixelRatioCap: 1.5, // devicePixelRatio cap while split-screen is active (2x draw calls, §Phase 2c)
   shadowMapSize: 2048, // directional-light shadow map resolution; drop to 1024 if split-screen shadow cost is too high (§Phase 4 item 3)
+  padBoostDuration: 0.9, // sec; boost-pad surface-zone timer, reuses the mushroom/drift boostTimer mechanism (§Phase 4 item 4)
 };

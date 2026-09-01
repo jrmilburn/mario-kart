@@ -1,6 +1,9 @@
 import * as THREE from 'three';
-import { CONTROL_POINTS, ROAD_HALF, GRASS_HALF, CHECKPOINT_COUNT } from './trackData';
+import { CONTROL_POINTS, ROAD_HALF, GRASS_HALF, CHECKPOINT_COUNT, SURFACE_ZONES, type SurfaceZone } from './trackData';
 import { buildAsphaltTexture, buildGrassTexture, tryLoadTextureOverride } from '../render/textures';
+// Value import from TrackQuery is safe here (no runtime cycle): TrackQuery's
+// only import of this module is `import type`, which is erased at compile time.
+import { sampleAtArcLength } from './TrackQuery';
 
 export interface TrackSample {
   pos: THREE.Vector3;
@@ -383,6 +386,112 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   return group;
 }
 
+// §Phase 4 item 4: track-authored surface-zone visuals. A soft cyan double
+// chevron (canvas texture on an unlit plane) for boost pads, a translucent
+// tan ribbon for sand. Both are purely cosmetic — TrackQuery.surfaceAt +
+// stepKart's `surface` param drive the actual physics independently.
+const SURFACE_VISUAL_Y = 0.012; // just above the road/grass surface, avoids z-fighting
+
+function buildBoostChevronTexture(): THREE.CanvasTexture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.strokeStyle = '#eafcff';
+  ctx.lineWidth = 14;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const chevron = (cy: number) => {
+    ctx.beginPath();
+    ctx.moveTo(size * 0.18, cy + size * 0.16);
+    ctx.lineTo(size * 0.5, cy - size * 0.16);
+    ctx.lineTo(size * 0.82, cy + size * 0.16);
+    ctx.stroke();
+  };
+  chevron(size * 0.32);
+  chevron(size * 0.68);
+  const texture = new THREE.CanvasTexture(canvas);
+  return texture;
+}
+
+const boostChevronMaterial = new THREE.MeshBasicMaterial({
+  map: buildBoostChevronTexture(),
+  color: 0x33e6ff,
+  transparent: true,
+  depthWrite: false,
+});
+
+// A handful of chevron quads spanning the zone's s-range, each pointing
+// along track-forward at its own sample so they follow curvature.
+function buildBoostPadVisual(samples: TrackSample[], totalLength: number, zone: SurfaceZone): THREE.Group {
+  const group = new THREE.Group();
+  const latMin = zone.latMin ?? -ROAD_HALF;
+  const latMax = zone.latMax ?? ROAD_HALF;
+  const lateralCenter = (latMin + latMax) / 2;
+  const width = latMax - latMin;
+  const chevronCount = 3;
+  for (let i = 0; i < chevronCount; i++) {
+    const t = (i + 0.5) / chevronCount;
+    const s = zone.sStart + (zone.sEnd - zone.sStart) * t;
+    const sample = sampleAtArcLength(samples, totalLength, s);
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(width * 0.8, 2.4), boostChevronMaterial);
+    quad.rotation.x = -Math.PI / 2;
+    quad.rotation.z = Math.atan2(sample.forward.x, sample.forward.z);
+    quad.position.copy(sample.pos).addScaledVector(sample.right, lateralCenter);
+    quad.position.y += SURFACE_VISUAL_Y;
+    group.add(quad);
+  }
+  return group;
+}
+
+const sandPatchMaterial = new THREE.MeshBasicMaterial({
+  color: 0xd9b26a,
+  transparent: true,
+  opacity: 0.6,
+  depthWrite: false,
+});
+
+// A ribbon following the curve across the zone's s-range and lateral extent —
+// same construction idea as buildGrassMesh but for one short, one-off patch.
+// Assumes zone.sStart < zone.sEnd (non-wrapping); wrap-across-seam zones still
+// work physically via TrackQuery.surfaceAt, they just render no visual patch.
+function buildSandPatchVisual(samples: TrackSample[], totalLength: number, zone: SurfaceZone): THREE.Mesh {
+  const latMin = zone.latMin ?? -GRASS_HALF;
+  const latMax = zone.latMax ?? GRASS_HALF;
+  const segments = 8;
+  const positions: number[] = [];
+  const indices: number[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const s = zone.sStart + (zone.sEnd - zone.sStart) * t;
+    const sample = sampleAtArcLength(samples, totalLength, s);
+    const inner = sample.pos.clone().addScaledVector(sample.right, latMin);
+    const outer = sample.pos.clone().addScaledVector(sample.right, latMax);
+    positions.push(inner.x, inner.y + SURFACE_VISUAL_Y, inner.z, outer.x, outer.y + SURFACE_VISUAL_Y, outer.z);
+  }
+  for (let i = 0; i < segments; i++) {
+    const a = i * 2;
+    const b = (i + 1) * 2;
+    indices.push(a, b, b + 1, a, b + 1, a + 1);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return new THREE.Mesh(geometry, sandPatchMaterial);
+}
+
+function buildSurfaceZoneVisuals(samples: TrackSample[], totalLength: number): THREE.Group {
+  const group = new THREE.Group();
+  for (const zone of SURFACE_ZONES) {
+    if (zone.sStart > zone.sEnd) continue; // wrap-across-seam zones: physics only, no authored visual yet
+    if (zone.type === 'boost') group.add(buildBoostPadVisual(samples, totalLength, zone));
+    else group.add(buildSandPatchVisual(samples, totalLength, zone));
+  }
+  return group;
+}
+
 export function buildTrack(): TrackData {
   const { samples, totalLength } = buildSamples();
 
@@ -397,6 +506,7 @@ export function buildTrack(): TrackData {
   group.add(buildWallMeshes(samples));
   group.add(buildStartFinish(samples[checkpoints[0]]));
   group.add(buildTracksideProps(samples));
+  group.add(buildSurfaceZoneVisuals(samples, totalLength));
 
   return { samples, totalLength, checkpoints, group };
 }

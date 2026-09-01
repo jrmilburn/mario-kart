@@ -554,7 +554,8 @@ startLoop(
         control = NEUTRAL_CONTROL; // unreachable: every non-human entity carries an AiState
       }
 
-      stepKart(e.kart, control, dt, offRoad, topSpeedScale);
+      const surface = trackQuery.surfaceAt(preSample.s, preSample.lateral);
+      stepKart(e.kart, control, dt, offRoad, topSpeedScale, surface);
       hitWallThisTick[i] = resolveWallCollision(e.kart, trackQuery);
 
       if (racing) {

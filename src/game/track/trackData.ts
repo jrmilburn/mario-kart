@@ -23,3 +23,29 @@ export const CONTROL_POINTS: THREE.Vector3[] = [
 export const ROAD_HALF = 6;
 export const GRASS_HALF = 14;
 export const CHECKPOINT_COUNT = 12;
+
+// §Phase 4 item 4. `sStart`/`sEnd` are arc-length positions in meters
+// (wrap-aware: sStart > sEnd means the zone spans across the start/finish
+// seam — TrackQuery.surfaceAt handles that). `latMin`/`latMax` are signed
+// lateral bounds (same convention as TrackQuery's `lateral`, §TrackQuery.ts);
+// omitted means unbounded on that side, i.e. the zone applies at any lateral
+// offset within the s-range. Placed here (not TrackBuilder) so main.ts and
+// TrackQuery can both import the data without a build-time dependency on THREE.
+export interface SurfaceZone {
+  sStart: number;
+  sEnd: number;
+  type: 'boost' | 'sand';
+  latMin?: number;
+  latMax?: number;
+}
+
+// Three boost pads on the racing line (end of the long straight, mid back
+// straight, exit of the chicane straight) plus one sand trap punishing a
+// tight inside cut through the hairpin apex. Authored against the current
+// ~620m layout; re-placed against the new ~900m layout in §Phase 4 item 5.
+export const SURFACE_ZONES: SurfaceZone[] = [
+  { sStart: 95, sEnd: 105, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
+  { sStart: 288, sEnd: 298, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
+  { sStart: 430, sEnd: 440, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
+  { sStart: 493, sEnd: 515, type: 'sand', latMin: ROAD_HALF, latMax: GRASS_HALF - 1 },
+];

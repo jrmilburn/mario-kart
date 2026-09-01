@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { TrackSample } from './TrackBuilder';
+import { SURFACE_ZONES, type SurfaceZone } from './trackData';
 
 const CELL_SIZE = 8;
 
@@ -95,6 +96,25 @@ export class TrackQuery {
       right: sample.right,
       forward: sample.forward,
     };
+  }
+
+  // §Phase 4 item 4. Wrap-aware linear scan over SURFACE_ZONES (a handful of
+  // entries — no need for a spatial index). Returns the first zone's type
+  // that contains (s, lateral), or null off any zone. `s` wraps at
+  // totalLength the same way `sStart > sEnd` zones do (isInZone below).
+  surfaceAt(s: number, lateral: number): SurfaceZone['type'] | null {
+    const sWrapped = ((s % this.totalLength) + this.totalLength) % this.totalLength;
+    for (const zone of SURFACE_ZONES) {
+      const inS =
+        zone.sStart <= zone.sEnd
+          ? sWrapped >= zone.sStart && sWrapped <= zone.sEnd
+          : sWrapped >= zone.sStart || sWrapped <= zone.sEnd; // zone spans the start/finish seam
+      if (!inS) continue;
+      if (zone.latMin !== undefined && lateral < zone.latMin) continue;
+      if (zone.latMax !== undefined && lateral > zone.latMax) continue;
+      return zone.type;
+    }
+    return null;
   }
 
   private projectOntoSegment(pos: THREE.Vector3, i0: number, i1: number): SegmentProjection {

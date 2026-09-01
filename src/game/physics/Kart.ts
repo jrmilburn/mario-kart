@@ -68,12 +68,16 @@ const SPIN_OUT_YAW_RATE = 10; // rad/s
 // grass speed cap; boost overrides the cap so a mushroom powers through grass.
 // `topSpeedScale` is AI rubber-banding/personality (§3.4 step 5) — applied only
 // to the cruise speed cap, never to accel/brake/off-road/boost physics constants.
+// `surface` (§Phase 4 item 4, from TrackQuery.surfaceAt) layers a track-authored
+// surface zone on top: 'boost' tops up boostTimer like a mushroom pickup,
+// 'sand' forces the off-road speed cap even when technically within ROAD_HALF.
 export function stepKart(
   kart: KartState,
   control: ControlState,
   dt: number,
   offRoad = false,
   topSpeedScale = 1,
+  surface: 'boost' | 'sand' | null = null,
 ) {
   const T = TUNING;
 
@@ -86,6 +90,13 @@ export function stepKart(
     kart.pos.addScaledVector(kartForward(kart.heading), kart.speed * dt);
     return;
   }
+
+  // 0. Boost-pad surface zone: tops up (never shortens) the same boostTimer a
+  // mushroom or a tiered drift release would set.
+  if (surface === 'boost') {
+    kart.boostTimer = Math.max(kart.boostTimer, T.padBoostDuration);
+  }
+  const effectiveOffRoad = offRoad || surface === 'sand';
 
   // 1. Longitudinal
   if (kart.boostTimer > 0) {
@@ -105,7 +116,7 @@ export function stepKart(
     kart.speed = moveToward(kart.speed, 0, T.coastDecel * dt);
   }
 
-  if (offRoad && kart.boostTimer <= 0) {
+  if (effectiveOffRoad && kart.boostTimer <= 0) {
     const cap = T.topSpeed * T.offRoadSpeedCap;
     if (Math.abs(kart.speed) > cap) {
       kart.speed = moveToward(kart.speed, Math.sign(kart.speed) * cap, T.offRoadDecel * dt);
