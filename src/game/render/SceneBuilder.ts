@@ -16,18 +16,8 @@ export interface KartVisual {
   driverAnchor: THREE.Group;
 }
 
-// One large flat plane beneath everything (§3.1) for far-field coverage beyond
-// the modeled grass ribbon around the track. Color matches the grass ribbon
-// (TrackBuilder) for a seamless blend at the horizon.
-export function buildGround(scene: THREE.Scene) {
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(1000, 1000),
-    new THREE.MeshLambertMaterial({ color: 0x4a9c3f }),
-  );
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.05;
-  scene.add(ground);
-}
+// §Phase 4 item 2: the ground plane moved to render/Environment.ts
+// (buildEnvironment), textured to match the grass ribbon instead of a flat color.
 
 export function buildLights(scene: THREE.Scene) {
   scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x4a6b3a, 1.2));

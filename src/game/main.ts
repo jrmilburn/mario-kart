@@ -10,7 +10,6 @@ import { startLoop } from './core/loop';
 import { createKart, driftTier, kartForward, stepKart, type KartState } from './physics/Kart';
 import { resolveWallCollision, resolveKartKartCollisions } from './physics/collision';
 import {
-  buildGround,
   buildLights,
   buildKart,
   setDriver,
@@ -21,6 +20,7 @@ import {
   buildShellMesh,
   type KartVisual,
 } from './render/SceneBuilder';
+import { buildEnvironment } from './render/Environment';
 import { CHARACTERS, CHARACTERS_BY_ID, type CharacterDef } from './characters/registry';
 import { loadCharacterModelInstance, preloadAll } from './characters/CharacterLoader';
 import { buildTrack } from './track/TrackBuilder';
@@ -79,8 +79,6 @@ interface KartEntity {
 const app = document.getElementById('app')!;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x6ec6ff); // bright cheerful sky blue
-scene.fog = new THREE.Fog(0x6ec6ff, 70, 260);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -88,7 +86,7 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 app.appendChild(renderer.domElement);
 
 buildLights(scene);
-buildGround(scene);
+buildEnvironment(scene); // §Phase 4 item 2: sky dome, mountains, clouds, fog, ground plane
 
 const track = buildTrack();
 scene.add(track.group);
