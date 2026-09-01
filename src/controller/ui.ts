@@ -1,5 +1,6 @@
-import type { EventName } from '../shared/protocol';
+import type { EventName, PlayerSlot, RosterPick } from '../shared/protocol';
 import { TUNING } from '../game/tuning';
+import { CHARACTERS } from '../game/characters/registry';
 import { ControllerSocket, getStoredRoomCode, type ConnectionStatus } from './ControllerSocket';
 import { TouchSteering } from './TouchSteering';
 import { TiltSteering, checkTiltAvailability, requestTiltPermission } from './TiltSteering';
@@ -403,6 +404,70 @@ export function initControllerUI(root: HTMLElement) {
   raceStatusText.style.cssText = 'font-size:22px; text-align:center; padding:0 24px;';
   raceOverlay.appendChild(raceStatusText);
 
+  // §Phase 3 character panel: grid of 6 tiles (name + color swatch), shown
+  // only in the lobby. Lives inside raceOverlay (the only lobby-state
+  // surface, so this is the one place taps actually reach it) but follows
+  // the same dedicated-panel/explicit-show-hide convention as
+  // codeEntryPanel/playPanel — its own element, its own show/hide functions,
+  // untangled from the overlay's own start/restart logic.
+  const characterPanel = document.createElement('div');
+  characterPanel.style.cssText =
+    'display:none; grid-template-columns:repeat(3, 1fr); gap:8px; width:100%; max-width:380px;';
+  raceOverlay.appendChild(characterPanel);
+
+  interface CharacterTile {
+    id: string;
+    button: HTMLButtonElement;
+  }
+  const characterTiles: CharacterTile[] = CHARACTERS.map((c) => {
+    const button = document.createElement('button');
+    button.style.cssText =
+      'display:flex; flex-direction:column; align-items:center; gap:4px; padding:8px 4px; ' +
+      'border-radius:12px; border:2px solid transparent; background:rgba(255,255,255,0.12); ' +
+      'color:#fff; font-size:12px; font-weight:700; touch-action:manipulation;';
+    const swatch = document.createElement('div');
+    swatch.style.cssText =
+      `width:24px; height:24px; border-radius:50%; background:#${c.kartColor.toString(16).padStart(6, '0')}; ` +
+      'border:1px solid rgba(255,255,255,0.4);';
+    const label = document.createElement('div');
+    label.textContent = c.name;
+    button.append(swatch, label);
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      activeSocket?.sendSelect(c.id);
+    });
+    characterPanel.appendChild(button);
+    return { id: c.id, button };
+  });
+
+  let mySlot: PlayerSlot | null = null;
+  let latestPicks: RosterPick[] = [];
+
+  // Own pick highlighted; tiles the *other* connected slot currently holds
+  // are greyed and non-tappable. AI picks never appear here (those are
+  // resolved server-side only at countdown), so there's nothing to grey
+  // out on their account.
+  function renderCharacterTiles() {
+    const otherSlot: PlayerSlot | null = mySlot === 0 ? 1 : mySlot === 1 ? 0 : null;
+    const minePick = mySlot !== null ? latestPicks.find((p) => p.slot === mySlot)?.characterId ?? null : null;
+    const otherPick = otherSlot !== null ? latestPicks.find((p) => p.slot === otherSlot)?.characterId ?? null : null;
+    for (const tile of characterTiles) {
+      const taken = otherPick === tile.id;
+      tile.button.disabled = taken;
+      tile.button.style.opacity = taken ? '0.35' : '1';
+      tile.button.style.cursor = taken ? 'default' : 'pointer';
+      tile.button.style.borderColor = minePick === tile.id ? '#fff' : 'transparent';
+    }
+  }
+
+  function showCharacterPanel() {
+    characterPanel.style.display = 'grid';
+  }
+
+  function hideCharacterPanel() {
+    characterPanel.style.display = 'none';
+  }
+
   const startBtn = document.createElement('button');
   startBtn.textContent = 'START RACE';
   startBtn.style.cssText =
@@ -465,9 +530,11 @@ export function initControllerUI(root: HTMLElement) {
     switch (name) {
       case 'lobby':
         showRaceOverlay('', true, false);
+        showCharacterPanel();
         break;
       case 'countdown':
         showRaceOverlay('Get ready…', false, false);
+        hideCharacterPanel();
         // One tick per second for the 3-2-1 countdown, approximated locally
         // (the game doesn't send a message per tick, only the countdown start).
         vibrate(30);
@@ -523,8 +590,11 @@ export function initControllerUI(root: HTMLElement) {
         onJoined: (slot) => {
           slotBadge.textContent = slot === 0 ? 'P1' : 'P2';
           slotBadge.style.display = 'block';
+          mySlot = slot;
+          renderCharacterTiles();
           showPlay();
           showRaceOverlay('', true, false); // default to the lobby/START state until an event says otherwise
+          showCharacterPanel();
           wakeLock.start();
           // Tilt is the default steering mode; attempt it once per session,
           // falling back to touch (with a one-tap retry toast) if unavailable.
@@ -542,6 +612,10 @@ export function initControllerUI(root: HTMLElement) {
         },
         onGameLeft: () => showCodeEntry('Game closed. Enter a new code to reconnect.'),
         onEvent: handleRaceEvent,
+        onRoster: (picks) => {
+          latestPicks = picks;
+          renderCharacterTiles();
+        },
         onRtt: (rttMs) => {
           rttText.textContent = `${Math.round(rttMs)}ms`;
         },

@@ -213,6 +213,21 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
       return;
     }
 
+    // §Phase 3: character select, stamped with the sender's slot exactly like input.
+    if (state.role === 'controller' && msg.type === 'select') {
+      if (room.gameSocket) send(room.gameSocket, { ...msg, slot: state.slot });
+      return;
+    }
+
+    // §Phase 3: roster broadcast — every connected controller needs the full
+    // picture to grey out taken tiles, so no slot targeting here.
+    if (state.role === 'game' && msg.type === 'roster') {
+      for (const cs of room.controllerSockets) {
+        if (cs) send(cs, msg);
+      }
+      return;
+    }
+
     if (state.role === 'game' && msg.type === 'event') {
       if (msg.slot !== undefined) {
         const cs = room.controllerSockets[msg.slot];

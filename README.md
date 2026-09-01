@@ -24,6 +24,40 @@ npm start
 
 Serves both pages and the relay from a single Node process on :8787.
 
+## Character models
+
+The game ships with **zero character model files** and runs fine that way — every kart's
+driver renders as a procedural fallback (head, torso, cap) colored per character. Dropping
+in real 3D models is entirely optional.
+
+If you want to add them: download fan-made GLB models — [The Models Resource](
+https://www.models-resource.com/) and [Sketchfab](https://sketchfab.com/) are good sources —
+converted to `.glb` with embedded textures if they aren't already. Name each file exactly to
+match its character id and drop it in `public/assets/characters/`:
+
+```
+public/assets/characters/mario.glb
+public/assets/characters/luigi.glb
+public/assets/characters/peach.glb
+public/assets/characters/yoshi.glb
+public/assets/characters/toad.glb
+public/assets/characters/bowser.glb
+```
+
+Target under ~5,000 triangles per model for reasonable performance with up to 6 karts on
+screen. A model's fit is rarely perfect out of the box — open `src/game/characters/registry.ts`
+and tweak that character's `scale` / `yOffset` / `rotationY` until it sits correctly on the
+kart's seat and faces forward.
+
+Missing files are harmless: any character without a `.glb` (or with a file that fails to
+load) just keeps its procedural fallback driver, silently, with a console warning.
+
+**IP notice:** fan-made Nintendo character models are for personal/local use only. The
+`public/assets/` directory is git-ignored for this reason — never commit these files, and
+never deploy a build that includes them anywhere public. The procedural-fallback mode
+(i.e. the repo as checked out, before you add any models) is the only configuration safe to
+share or deploy publicly.
+
 ## Deployment paths (phone connectivity + tilt steering)
 
 Tilt steering requires a **secure context** (HTTPS) on the phone — plain `http://<lan-ip>`

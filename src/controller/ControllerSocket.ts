@@ -4,6 +4,7 @@ import {
   type ControllerToServer,
   type EventName,
   type PlayerSlot,
+  type RosterPick,
   type SteerMode,
 } from '../shared/protocol';
 
@@ -30,6 +31,7 @@ export interface ControllerSocketCallbacks {
   onJoinError?: (reason: JoinErrorReason) => void;
   onGameLeft?: () => void;
   onEvent?: (name: EventName) => void;
+  onRoster?: (picks: RosterPick[]) => void;
   onRtt?: (rttMs: number) => void;
 }
 
@@ -90,6 +92,9 @@ export class ControllerSocket {
           break;
         case 'event':
           this.callbacks.onEvent?.(msg.name);
+          break;
+        case 'roster':
+          this.callbacks.onRoster?.(msg.picks);
           break;
         case 'pong': {
           const sentAt = this.pendingPings.get(msg.t);
@@ -165,6 +170,10 @@ export class ControllerSocket {
 
   sendEvent(name: EventName) {
     this.sendRaw({ type: 'event', name });
+  }
+
+  sendSelect(characterId: string) {
+    this.sendRaw({ type: 'select', characterId });
   }
 
   private sendRaw(msg: ControllerToServer) {

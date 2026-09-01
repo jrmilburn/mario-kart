@@ -5,6 +5,7 @@ import {
   type GameToServer,
   type InputSnapshot,
   type PlayerSlot,
+  type RosterPick,
 } from '../../shared/protocol';
 
 const ROOM_STORAGE_KEY = 'kart.game.roomCode';
@@ -18,6 +19,7 @@ export interface GameSocketCallbacks {
   onPeer?: (event: 'controller-joined' | 'controller-left' | 'game-left', slot?: PlayerSlot) => void;
   onInput?: (snapshot: InputSnapshot) => void;
   onEvent?: (name: EventName, slot?: PlayerSlot) => void; // commands relayed from the controller (start/restart)
+  onSelect?: (characterId: string, slot?: PlayerSlot) => void; // §Phase 3: relayed from the controller, slot server-stamped
   onStatus?: (status: ConnectionStatus) => void;
   onRtt?: (rttMs: number) => void;
 }
@@ -70,6 +72,9 @@ export class GameSocket {
         case 'event':
           this.callbacks.onEvent?.(msg.name, msg.slot);
           break;
+        case 'select':
+          this.callbacks.onSelect?.(msg.characterId, msg.slot);
+          break;
         case 'pong': {
           const sentAt = this.pendingPings.get(msg.t);
           if (sentAt !== undefined) {
@@ -121,6 +126,10 @@ export class GameSocket {
 
   sendEvent(name: EventName, slot?: PlayerSlot) {
     this.sendRaw({ type: 'event', name, slot });
+  }
+
+  sendRoster(picks: RosterPick[]) {
+    this.sendRaw({ type: 'roster', picks });
   }
 
   private sendRaw(msg: GameToServer) {

@@ -90,17 +90,47 @@ export interface PongMessage {
   t: number;
 }
 
+// §Phase 3: character select. controller -> game, slot STAMPED BY SERVER on
+// relay (never trusted from the controller) exactly like InputSnapshot.slot.
+export interface SelectMessage {
+  type: 'select';
+  characterId: string;
+  slot?: PlayerSlot;
+}
+
+// game -> all controllers, broadcast (no slot targeting needed — every phone
+// needs the full picture to grey out taken tiles). Re-sent whenever a pick
+// changes and whenever a controller joins, so a freshly-connected phone gets
+// the current state without the game needing separate join-time bookkeeping.
+// `characterId: null` means that slot currently has no live pick (e.g. no
+// controller connected there).
+export interface RosterPick {
+  slot: PlayerSlot;
+  characterId: string | null;
+}
+
+export interface RosterMessage {
+  type: 'roster';
+  picks: RosterPick[];
+}
+
 // Messages a controller socket may send to the server.
-export type ControllerToServer = ControllerHello | InputSnapshot | PingMessage | EventMessage;
+export type ControllerToServer = ControllerHello | InputSnapshot | PingMessage | EventMessage | SelectMessage;
 
 // Messages a game socket may send to the server.
-export type GameToServer = GameHello | EventMessage | PingMessage;
+export type GameToServer = GameHello | EventMessage | PingMessage | RosterMessage;
 
 // Messages the server may send to a controller socket.
-export type ServerToController = JoinedMessage | ErrorMessage | PeerMessage | EventMessage | PongMessage;
+export type ServerToController =
+  | JoinedMessage
+  | ErrorMessage
+  | PeerMessage
+  | EventMessage
+  | PongMessage
+  | RosterMessage;
 
 // Messages the server may send to a game socket.
-export type ServerToGame = RoomMessage | PeerMessage | InputSnapshot | EventMessage | PongMessage;
+export type ServerToGame = RoomMessage | PeerMessage | InputSnapshot | EventMessage | PongMessage | SelectMessage;
 
 export type AnyMessage =
   | HelloMessage
@@ -111,7 +141,9 @@ export type AnyMessage =
   | EventMessage
   | InputSnapshot
   | PingMessage
-  | PongMessage;
+  | PongMessage
+  | SelectMessage
+  | RosterMessage;
 
 const MAX_MESSAGE_BYTES = 1024;
 
@@ -149,6 +181,10 @@ function isAnyMessage(obj: unknown): obj is AnyMessage {
       return isPingOrPong(obj as PingMessage);
     case 'pong':
       return isPingOrPong(obj as PongMessage);
+    case 'select':
+      return isSelectMessage(obj as SelectMessage);
+    case 'roster':
+      return isRosterMessage(obj as RosterMessage);
     default:
       return false;
   }
@@ -233,6 +269,26 @@ export function isInputSnapshot(m: unknown): m is InputSnapshot {
 export function isPingOrPong(m: unknown): m is PingMessage | PongMessage {
   const o = m as Partial<PingMessage>;
   return typeof o.t === 'number';
+}
+
+export function isSelectMessage(m: unknown): m is SelectMessage {
+  const o = m as Partial<SelectMessage>;
+  return (
+    typeof o.characterId === 'string' &&
+    o.characterId.length > 0 &&
+    o.characterId.length <= 32 &&
+    (o.slot === undefined || isPlayerSlot(o.slot))
+  );
+}
+
+function isRosterPick(v: unknown): v is RosterPick {
+  const o = v as Partial<RosterPick>;
+  return isPlayerSlot(o.slot) && (o.characterId === null || typeof o.characterId === 'string');
+}
+
+export function isRosterMessage(m: unknown): m is RosterMessage {
+  const o = m as Partial<RosterMessage>;
+  return Array.isArray(o.picks) && o.picks.every(isRosterPick);
 }
 
 export const ROOM_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';

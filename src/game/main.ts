@@ -409,6 +409,34 @@ const raceDirector = new RaceDirector({
   },
 });
 
+// §Phase 3: character select + roster broadcast. Each RosterPick's
+// characterId is simply the entity's *current* character whenever that slot
+// has a live controller (null otherwise) — entity state is the single source
+// of truth for "what's currently selected", so there's no separate
+// pick-tracking state to keep in sync with it.
+function broadcastRoster() {
+  socket.sendRoster(
+    players.map((p) => ({
+      slot: p.slot,
+      characterId: p.connected ? entityFor(p).characterId : null,
+    })),
+  );
+}
+
+// Accepted only in LOBBY, first-come per character: rejected if the *other*
+// connected slot is already showing this character. AI's characters are a
+// separate concern resolved only at countdown (lockRoster) — picking a
+// character an AI kart happens to be previewing right now is always allowed.
+function trySelectCharacter(slot: PlayerSlot, characterId: string) {
+  if (raceDirector.state !== 'LOBBY') return;
+  const def = CHARACTERS_BY_ID[characterId];
+  if (!def) return;
+  const other = players[slot === 0 ? 1 : 0];
+  if (other.connected && entityFor(other).characterId === characterId) return; // taken
+  applyCharacterToEntity(entityFor(players[slot]), def);
+  broadcastRoster();
+}
+
 const socket = new GameSocket({
   onRoom: (code, joinUrl) => hud.showRoom(code, joinUrl),
   onStatus: (status) => hud.setConnectionStatus(status),
@@ -419,6 +447,10 @@ const socket = new GameSocket({
     const s = slot ?? 0;
     players[s].connected = event === 'controller-joined';
     hud.setPeerStatus(s, players[s].connected);
+    // A freshly-joined controller needs the current roster to render its
+    // panel; the other controller needs to know this slot just freed up (or
+    // claimed) its character (§Phase 3).
+    if (event === 'controller-joined' || event === 'controller-left') broadcastRoster();
   },
   onInput: (snapshot) => {
     const slot = snapshot.slot ?? 0;
@@ -431,6 +463,7 @@ const socket = new GameSocket({
     if (name === 'start') raceDirector.requestStart();
     else if (name === 'restart') raceDirector.requestRestart();
   },
+  onSelect: (characterId, slot) => trySelectCharacter(slot ?? 0, characterId),
 });
 void socket;
 
