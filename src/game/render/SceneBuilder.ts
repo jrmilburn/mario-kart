@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { damp } from '../../shared/mathUtils';
+import { TUNING } from '../tuning';
 import type { KartState } from '../physics/Kart';
 import type { CharacterDef, CharacterFallbackColors } from '../characters/registry';
 
@@ -7,7 +8,6 @@ export interface KartVisual {
   group: THREE.Group; // body+wheels+driverAnchor; position/rotation driven by physics
   body: THREE.Mesh; // gets the drift-lean roll
   frontWheelPivots: THREE.Group[]; // steer-yawed independently of body lean
-  shadow: THREE.Mesh; // flat blob shadow; position-only follow, never rotates
   leanAngle: number; // smoothed drift-lean state, mutated by updateKartVisual
   // §Phase 3: seat anchor for the driver (GLTF model or procedural fallback).
   // Parented under `body` (not `group`) so it inherits the existing drift-lean
@@ -19,11 +19,43 @@ export interface KartVisual {
 // §Phase 4 item 2: the ground plane moved to render/Environment.ts
 // (buildEnvironment), textured to match the grass ribbon instead of a flat color.
 
-export function buildLights(scene: THREE.Scene) {
+export interface Lights {
+  directional: THREE.DirectionalLight;
+}
+
+// §Phase 4 item 3: fixed offset from whatever point the directional light's
+// shadow target is currently following (see updateLightTarget) — kept
+// constant every frame so the light always views the target from the same
+// angle, just from a re-centered position.
+export const SHADOW_LIGHT_OFFSET = new THREE.Vector3(40, 70, 30);
+const SHADOW_HALF_SIZE = 40; // ~80x80m ortho shadow camera (§Phase 4 item 3)
+
+export function buildLights(scene: THREE.Scene): Lights {
   scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x4a6b3a, 1.2));
   const dir = new THREE.DirectionalLight(0xfff3d6, 0.9);
-  dir.position.set(5, 10, 5);
+  dir.castShadow = true;
+  dir.shadow.mapSize.set(TUNING.shadowMapSize, TUNING.shadowMapSize);
+  dir.shadow.camera.left = -SHADOW_HALF_SIZE;
+  dir.shadow.camera.right = SHADOW_HALF_SIZE;
+  dir.shadow.camera.top = SHADOW_HALF_SIZE;
+  dir.shadow.camera.bottom = -SHADOW_HALF_SIZE;
+  dir.shadow.camera.near = 10;
+  dir.shadow.camera.far = 180;
+  dir.shadow.bias = -0.0015; // avoids shadow acne on the flat road/ground planes
+  dir.position.copy(SHADOW_LIGHT_OFFSET);
   scene.add(dir);
+  scene.add(dir.target);
+  return { directional: dir };
+}
+
+// Re-centers the shadow camera on `target` (world-space) each frame, keeping
+// the light's relative offset fixed — called from main.ts's render callback
+// with the active players' midpoint (§Phase 4 item 3). `dir.target` must
+// already be added to the scene (buildLights does this) for its matrixWorld
+// to update during render.
+export function updateLightTarget(dir: THREE.DirectionalLight, target: THREE.Vector3) {
+  dir.target.position.copy(target);
+  dir.position.copy(target).add(SHADOW_LIGHT_OFFSET);
 }
 
 // Kart's local "nose" points toward +Z (matches physics/Kart.ts kartForward()).
@@ -39,6 +71,7 @@ export function buildKart(def: CharacterDef): KartVisual {
     new THREE.MeshLambertMaterial({ color: def.kartColor }),
   );
   body.position.y = 0.5;
+  body.castShadow = true;
   group.add(body);
 
   // Seat anchor: ~(0, 0.75, -0.3) in kart-floor space, expressed here relative
@@ -54,6 +87,7 @@ export function buildKart(def: CharacterDef): KartVisual {
   function makeWheelMesh(): THREE.Mesh {
     const wheel = new THREE.Mesh(wheelGeo, wheelMat);
     wheel.rotation.z = Math.PI / 2;
+    wheel.castShadow = true;
     return wheel;
   }
 
@@ -73,14 +107,10 @@ export function buildKart(def: CharacterDef): KartVisual {
     group.add(wheel);
   }
 
-  const shadow = new THREE.Mesh(
-    new THREE.CircleGeometry(1.3, 16),
-    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }),
-  );
-  shadow.rotation.x = -Math.PI / 2;
-  shadow.position.y = 0.02;
-
-  const visual: KartVisual = { group, body, frontWheelPivots, shadow, leanAngle: 0, driverAnchor };
+  // §Phase 4 item 3: no more flat blob shadow mesh — real shadow maps replace
+  // it (buildLights/updateLightTarget), and karts cast a real shadow via
+  // body.castShadow/wheel castShadow above and the driver traversal in setDriver.
+  const visual: KartVisual = { group, body, frontWheelPivots, leanAngle: 0, driverAnchor };
   setDriver(visual, def, null); // seed the fallback immediately; caller swaps in the real model once loaded
   return visual;
 }
@@ -118,6 +148,13 @@ export function setDriver(visual: KartVisual, def: CharacterDef, model: THREE.Ob
   } else {
     anchor.add(buildFallbackDriver(def.fallbackColors));
   }
+
+  // §Phase 4 item 3: drivers cast shadows too, whichever branch mounted them —
+  // set here (rather than once in buildKart) since setDriver re-mounts on
+  // every character reselect and every async GLTF-model swap-in.
+  anchor.traverse((obj) => {
+    if (obj instanceof THREE.Mesh) obj.castShadow = true;
+  });
 }
 
 // Sets just the kart body's tint — used when a player swaps characters so the
@@ -178,8 +215,6 @@ export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number
   for (const pivot of visual.frontWheelPivots) {
     pivot.rotation.y = kart.steerActual * FRONT_WHEEL_YAW_SCALE;
   }
-
-  visual.shadow.position.set(kart.pos.x, 0.02, kart.pos.z);
 }
 
 // §Phase 10 item visuals -----------------------------------------------------

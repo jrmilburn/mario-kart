@@ -137,7 +137,9 @@ function buildRoadMesh(samples: TrackSample[], totalLength: number): THREE.Mesh 
 
   const material = new THREE.MeshLambertMaterial({ vertexColors: true, map: buildAsphaltTexture() });
   tryLoadTextureOverride('/assets/textures/asphalt.jpg', material);
-  return new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.receiveShadow = true; // §Phase 4 item 3
+  return mesh;
 }
 
 // u spans the full -GRASS_HALF..GRASS_HALF cross-section (both ribbons share
@@ -202,7 +204,9 @@ function buildGrassMesh(samples: TrackSample[], totalLength: number): THREE.Mesh
 
   const material = new THREE.MeshLambertMaterial({ vertexColors: true, map: buildGrassTexture() });
   tryLoadTextureOverride('/assets/textures/grass.jpg', material);
-  return new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.receiveShadow = true; // §Phase 4 item 3
+  return mesh;
 }
 
 function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
@@ -318,10 +322,12 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   const trunkGeo = new THREE.CylinderGeometry(0.15, 0.2, 1.2, 6);
   const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4423 });
   const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, treeIndices.length);
+  trunkMesh.castShadow = true; // §Phase 4 item 3
 
   const topGeo = new THREE.ConeGeometry(0.9, 2.2, 7);
   const topMat = new THREE.MeshLambertMaterial({ color: 0x2f8f3f });
   const topMesh = new THREE.InstancedMesh(topGeo, topMat, treeIndices.length);
+  topMesh.castShadow = true; // §Phase 4 item 3
 
   const m = new THREE.Matrix4();
   treeIndices.forEach((idx, i) => {

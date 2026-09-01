@@ -129,6 +129,7 @@ function buildGroundPlane(): THREE.Mesh {
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE), material);
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.05;
+  ground.receiveShadow = true; // §Phase 4 item 3
   return ground;
 }
 

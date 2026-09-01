@@ -11,6 +11,7 @@ import { createKart, driftTier, kartForward, stepKart, type KartState } from './
 import { resolveWallCollision, resolveKartKartCollisions } from './physics/collision';
 import {
   buildLights,
+  updateLightTarget,
   buildKart,
   setDriver,
   setKartColor,
@@ -83,9 +84,11 @@ const scene = new THREE.Scene();
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 app.appendChild(renderer.domElement);
 
-buildLights(scene);
+const lights = buildLights(scene);
 buildEnvironment(scene); // §Phase 4 item 2: sky dome, mountains, clouds, fog, ground plane
 
 const track = buildTrack();
@@ -155,7 +158,7 @@ const entities: KartEntity[] = GRID.map((g, i) => {
   const isAi = g.humanSlot === undefined;
   const kart = createKart(pos, heading, isAi);
   const visual = buildKart(def); // seeds body color + fallback driver synchronously
-  scene.add(visual.group, visual.shadow);
+  scene.add(visual.group);
   const entity: KartEntity = {
     kart,
     visual,
@@ -501,6 +504,7 @@ window.addEventListener('keydown', (e) => {
 
 let lastRenderTime = performance.now();
 let lastSplitState: boolean | null = null; // forces the first frame to apply sizing/layout
+const shadowMidpoint = new THREE.Vector3(); // reused each frame by the shadow-camera-follow block below
 
 startLoop(
   (dt) => {
@@ -654,6 +658,15 @@ startLoop(
 
     players[0].followCamera.update(entityFor(players[0]).kart, renderDt);
     if (split) players[1].followCamera.update(entityFor(players[1]).kart, renderDt);
+
+    // §Phase 4 item 3: shadow camera re-centers on the active players'
+    // midpoint every frame (light keeps its fixed relative offset) so the
+    // ~80x80m ortho shadow box always covers whoever's actually racing.
+    shadowMidpoint.set(0, 0, 0);
+    const activeForShadow = players.filter((p) => p.active);
+    for (const p of activeForShadow) shadowMidpoint.add(entityFor(p).kart.pos);
+    shadowMidpoint.divideScalar(activeForShadow.length || 1);
+    updateLightTarget(lights.directional, shadowMidpoint);
 
     // §Phase 11a/b: drift sparks tinted by tier, engine pitch mapped to speed.
     for (const e of entities) {
