@@ -15,7 +15,7 @@ import {
   updateShadowBounds,
   buildKart,
   setDriver,
-  setKartColor,
+  setKartCharacter,
   updateKartVisual,
   buildItemBoxMesh,
   buildBananaMesh,
@@ -159,15 +159,20 @@ function loadDriverFor(entity: KartEntity, def: CharacterDef) {
   });
 }
 
-// Rebuilds one entity's driver + kart color + display name for a new
-// character (initial assignment, a select pick, or the countdown AI
-// reassignment in lockRoster) — always seeds the fallback immediately, then
-// kicks off the real model load in the background.
+// Rebuilds one entity's kart + driver + display name for a new character
+// (initial assignment, a select pick, or the countdown AI reassignment in
+// lockRoster) — always seeds the procedural pair immediately, then kicks off
+// the real model load in the background.
+// §v3 Track B: setKartCharacter replaces the old setKartColor call — each
+// character now has their *own chassis* (Bowser's wide twin-exhaust heavy,
+// Toad's mini, Peach's royal), so re-picking has to rebuild the kart, not
+// just retint one body mesh. It preserves visual.driverAnchor, so the
+// setDriver call below is what re-mounts the driver.
 function applyCharacterToEntity(entity: KartEntity, def: CharacterDef) {
   entity.characterId = def.id;
   entity.name = def.name;
   entity.colorHex = characterColorHex(def);
-  setKartColor(entity.visual, def.kartColor);
+  setKartCharacter(entity.visual, def);
   setDriver(entity.visual, def, null);
   loadDriverFor(entity, def);
 }

@@ -2,11 +2,17 @@ import * as THREE from 'three';
 import { clamp, damp } from '../../shared/mathUtils';
 import { TUNING } from '../tuning';
 import type { KartState } from '../physics/Kart';
-import type { CharacterDef, CharacterFallbackColors } from '../characters/registry';
+import type { CharacterDef } from '../characters/registry';
+import { buildKartChassis, disposeChassis, type KartChassis } from './KartBuilder';
+import { armPivotOf, buildCharacterModel } from './CharacterBuilder';
 
 export interface KartVisual {
   group: THREE.Group; // body+wheels+driverAnchor; position/rotation driven by physics
-  body: THREE.Mesh; // gets the drift-lean roll
+  // §v3 Track B: was a single BoxGeometry Mesh, now the composed chassis Group
+  // (KartBuilder emits ~6 merged meshes, one per colour). Still exactly the
+  // node that takes the drift-lean roll and parents driverAnchor — that
+  // contract is what makes the driver lean into drifts for free.
+  body: THREE.Group;
   frontWheelPivots: THREE.Group[]; // steer-yawed independently of body lean
   leanAngle: number; // smoothed drift-lean state, mutated by updateKartVisual
   pitchAngle: number; // §Phase 5 item 5: smoothed slope-pitch state, mutated by updateKartVisual
@@ -15,6 +21,19 @@ export interface KartVisual {
   // roll (visual.body.rotation.z, set in updateKartVisual) for free — the
   // driver leans into drifts along with the kart body with no extra per-frame code.
   driverAnchor: THREE.Group;
+  // §v3 Track B item 4: the chassis' steering wheel and the procedural
+  // driver's arm-roll group, both turned by steerActual in updateKartVisual.
+  // `armPivot` is null whenever a GLB driver is mounted (no such node in an
+  // imported model) — the steering wheel belongs to the kart, so it survives.
+  steeringWheel?: THREE.Object3D;
+  armPivot: THREE.Object3D | null;
+  // Every material carrying the kart colour. setKartColor walks this instead
+  // of poking one mesh's material, and the instances are per-kart so tinting
+  // one kart can never repaint another (§v3 Track B item 4).
+  tintMaterials: THREE.MeshLambertMaterial[];
+  // Kept so setKartCharacter can dispose the outgoing chassis when a player
+  // re-picks: each character drives *their* kart, not just their colour.
+  chassis: KartChassis;
 }
 
 // §Phase 4 item 2: the ground plane moved to render/Environment.ts
@@ -98,58 +117,75 @@ export function buildKart(def: CharacterDef): KartVisual {
   // heading. Set once here rather than per-frame in updateKartVisual.
   group.rotation.order = 'YXZ';
 
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(1.2, 0.5, 2.2),
-    new THREE.MeshLambertMaterial({ color: def.kartColor }),
-  );
-  body.position.y = 0.5;
-  body.castShadow = true;
-  group.add(body);
-
-  // Seat anchor: ~(0, 0.75, -0.3) in kart-floor space, expressed here relative
-  // to `body`'s own origin (which already sits at y=0.5) since driverAnchor is
-  // parented under `body` (see KartVisual.driverAnchor).
+  // Seat anchor: positioned by mountChassis from the chassis profile (each
+  // kart kind seats its driver at a different height/setback) and parented
+  // under `body` (see KartVisual.driverAnchor).
   const driverAnchor = new THREE.Group();
-  driverAnchor.position.set(0, 0.25, -0.3);
-  body.add(driverAnchor);
-
-  const wheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.28, 12);
-  const wheelMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
-
-  function makeWheelMesh(): THREE.Mesh {
-    const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-    wheel.rotation.z = Math.PI / 2;
-    wheel.castShadow = true;
-    return wheel;
-  }
-
-  // Front wheels (+Z, toward the nose) get a steer pivot so they can yaw
-  // independently for the steering-angle visual; rear wheels are fixed.
-  const frontWheelPivots: THREE.Group[] = [];
-  for (const x of [0.65, -0.65]) {
-    const pivot = new THREE.Group();
-    pivot.position.set(x, 0.32, 0.75);
-    pivot.add(makeWheelMesh());
-    group.add(pivot);
-    frontWheelPivots.push(pivot);
-  }
-  for (const x of [0.65, -0.65]) {
-    const wheel = makeWheelMesh();
-    wheel.position.set(x, 0.32, -0.75);
-    group.add(wheel);
-  }
+  const chassis = buildKartChassis(def);
+  mountChassis(group, chassis, driverAnchor);
 
   // §Phase 4 item 3: no more flat blob shadow mesh — real shadow maps replace
-  // it (buildLights/updateLightTarget), and karts cast a real shadow via
-  // body.castShadow/wheel castShadow above and the driver traversal in setDriver.
-  const visual: KartVisual = { group, body, frontWheelPivots, leanAngle: 0, pitchAngle: 0, driverAnchor };
-  setDriver(visual, def, null); // seed the fallback immediately; caller swaps in the real model once loaded
+  // it (buildLights/updateLightTarget); every chassis/wheel/driver mesh sets
+  // castShadow at construction (PartAssembler) or in setDriver's traversal.
+  const visual: KartVisual = {
+    group,
+    body: chassis.body,
+    frontWheelPivots: chassis.frontWheelPivots,
+    leanAngle: 0,
+    pitchAngle: 0,
+    driverAnchor,
+    steeringWheel: chassis.steeringWheel,
+    armPivot: null,
+    tintMaterials: chassis.tintMaterials,
+    chassis,
+  };
+  setDriver(visual, def, null); // seed the procedural driver immediately; caller swaps in the real model once loaded
   return visual;
 }
 
+// Parents a freshly built chassis (body + wheels) under the kart root and
+// hangs `driverAnchor` off the body at that chassis' seat position. Split out
+// of buildKart because setKartCharacter re-runs it when a player re-picks.
+function mountChassis(group: THREE.Group, chassis: KartChassis, driverAnchor: THREE.Group) {
+  chassis.body.position.y = chassis.bodyPivotY;
+  group.add(chassis.body);
+  // Wheels hang off the ROOT, not the body: the drift lean must not tip them
+  // off the ground (this matches the pre-Track-B layout).
+  for (const pivot of chassis.frontWheelPivots) group.add(pivot);
+  for (const wheel of chassis.rearWheels) group.add(wheel);
+  driverAnchor.position.set(0, chassis.seatY - chassis.bodyPivotY, chassis.seatZ);
+  chassis.body.add(driverAnchor);
+}
+
+// §v3 Track B: swaps the whole chassis for `def`'s kart kind (Bowser's wide
+// twin-exhaust heavy, Peach's royal, Toad's mini...) and retints it. Called
+// when a player picks a different character; the driver currently mounted on
+// driverAnchor is carried across untouched (the caller re-mounts it right
+// afterwards via setDriver, but detaching first means an in-flight GLB model
+// is never caught by disposeChassis' traversal).
+export function setKartCharacter(visual: KartVisual, def: CharacterDef) {
+  const outgoing = visual.chassis;
+  visual.driverAnchor.removeFromParent();
+  outgoing.body.removeFromParent();
+  for (const pivot of outgoing.frontWheelPivots) pivot.removeFromParent();
+  for (const wheel of outgoing.rearWheels) wheel.removeFromParent();
+  disposeChassis(outgoing);
+
+  const chassis = buildKartChassis(def);
+  mountChassis(visual.group, chassis, visual.driverAnchor);
+  visual.chassis = chassis;
+  visual.body = chassis.body;
+  visual.frontWheelPivots = chassis.frontWheelPivots;
+  visual.steeringWheel = chassis.steeringWheel;
+  visual.tintMaterials = chassis.tintMaterials;
+  // The new body starts level; the smoothed lean/pitch state carries over so
+  // re-picking mid-drift doesn't pop.
+  visual.body.rotation.z = visual.leanAngle;
+}
+
 // §Phase 3: sets (or clears) the driver mounted on `visual.driverAnchor` — the
-// scaled/offset/rotated GLTF scene when `model` is provided, otherwise an
-// improved procedural fallback built from `def.fallbackColors`. Safe to call
+// scaled/offset/rotated GLTF scene when `model` is provided, otherwise the
+// procedural character built from `def.driver` (§v3 Track B). Safe to call
 // repeatedly (e.g. on character re-select, or when a model finishes loading
 // after the fallback was already showing): always clears whatever was mounted first.
 export function setDriver(visual: KartVisual, def: CharacterDef, model: THREE.Object3D | null) {
@@ -177,8 +213,13 @@ export function setDriver(visual: KartVisual, def: CharacterDef, model: THREE.Ob
     model.position.set(0, def.yOffset, 0);
     model.rotation.y = def.rotationY;
     anchor.add(model);
+    // A GLB has no arm-roll node to drive, so the per-frame arm animation
+    // simply switches off for it (the kart's steering wheel keeps turning).
+    visual.armPivot = null;
   } else {
-    anchor.add(buildFallbackDriver(def.fallbackColors));
+    const driver = buildCharacterModel(def);
+    anchor.add(driver);
+    visual.armPivot = armPivotOf(driver);
   }
 
   // §Phase 4 item 3: drivers cast shadows too, whichever branch mounted them —
@@ -189,50 +230,25 @@ export function setDriver(visual: KartVisual, def: CharacterDef, model: THREE.Ob
   });
 }
 
-// Sets just the kart body's tint — used when a player swaps characters so the
-// kart color updates immediately without rebuilding the whole KartVisual.
+// §v3 Track B item 4: retints the WHOLE chassis, not one body mesh — the kart
+// is now ~6 merged meshes and several of them carry the kart colour. The
+// materials in tintMaterials are per-kart instances (PartAssembler never
+// shares one between karts), so tinting here can only ever repaint this kart.
+// Used when a player swaps characters so the colour updates immediately
+// without rebuilding the KartVisual (setKartCharacter does the full rebuild).
 export function setKartColor(visual: KartVisual, color: number) {
-  (visual.body.material as THREE.MeshLambertMaterial).color.setHex(color);
-}
-
-// Head sphere + torso box + a simple domed cap, sized/positioned relative to
-// the driverAnchor origin (the seat) — deliberately more distinct than the
-// old lone floating head sphere so each character reads differently even
-// with zero GLB files present (the default, shippable state).
-function buildFallbackDriver(colors: CharacterFallbackColors): THREE.Group {
-  const driver = new THREE.Group();
-  // Tag so setDriver() knows it's safe (and necessary) to dispose these
-  // meshes' geometry/material on removal — unlike GLTF-sourced children,
-  // nothing else references them.
-  driver.userData.disposable = true;
-
-  const torso = new THREE.Mesh(
-    new THREE.BoxGeometry(0.5, 0.5, 0.4),
-    new THREE.MeshLambertMaterial({ color: colors.primary }),
-  );
-  torso.position.y = 0.25;
-  driver.add(torso);
-
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.28, 12, 10),
-    new THREE.MeshLambertMaterial({ color: colors.skin }),
-  );
-  head.position.y = 0.68;
-  driver.add(head);
-
-  const cap = new THREE.Mesh(
-    new THREE.SphereGeometry(0.3, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
-    new THREE.MeshLambertMaterial({ color: colors.secondary }),
-  );
-  cap.position.y = 0.74;
-  driver.add(cap);
-
-  return driver;
+  for (const mat of visual.tintMaterials) mat.color.setHex(color);
 }
 
 const LEAN_BLEND_RATE = 1 / 0.15; // blend the drift lean in/out over ~0.15s
 const PITCH_BLEND_RATE = 8; // §Phase 5 item 5: smooth the slope-pitch visual over ~0.125s
 const FRONT_WHEEL_YAW_SCALE = 0.4;
+// §v3 Track B item 4: steering wheel turn per unit of steerActual. Negative
+// because the wheel's +Z normal points away from the driver, so a positive
+// rotation.z reads as clockwise *to them* while positive steer points the
+// front wheels toward the kart's +X (its left).
+const STEER_WHEEL_SCALE = -0.7;
+const STEER_ARM_SCALE = -0.22; // the arms only need a hint of the same roll
 
 // Sets kart visuals from physics state each render frame (§3.2 closing paragraph):
 // body yaw = heading + drift lean, blended in/out over 0.15s; front wheels
@@ -256,6 +272,13 @@ export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number
   for (const pivot of visual.frontWheelPivots) {
     pivot.rotation.y = kart.steerActual * FRONT_WHEEL_YAW_SCALE;
   }
+
+  // §v3 Track B item 4: the steering wheel (and, when a procedural driver is
+  // mounted, their arms) follow the steering input. Two scalar writes, no
+  // allocation, no traversal — updateKartVisual runs for all six karts every
+  // frame and must stay allocation-free.
+  if (visual.steeringWheel) visual.steeringWheel.rotation.z = kart.steerActual * STEER_WHEEL_SCALE;
+  if (visual.armPivot) visual.armPivot.rotation.z = kart.steerActual * STEER_ARM_SCALE;
 }
 
 // §Phase 10 item visuals -----------------------------------------------------
