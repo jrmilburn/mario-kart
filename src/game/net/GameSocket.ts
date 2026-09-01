@@ -16,6 +16,7 @@ export interface GameSocketCallbacks {
   onRoom?: (code: string, joinUrl: string) => void;
   onPeer?: (event: 'controller-joined' | 'controller-left' | 'game-left') => void;
   onInput?: (snapshot: InputSnapshot) => void;
+  onEvent?: (name: EventName) => void; // commands relayed from the controller (start/restart)
   onStatus?: (status: ConnectionStatus) => void;
   onRtt?: (rttMs: number) => void;
 }
@@ -64,6 +65,9 @@ export class GameSocket {
           break;
         case 'input':
           this.callbacks.onInput?.(msg);
+          break;
+        case 'event':
+          this.callbacks.onEvent?.(msg.name);
           break;
         case 'pong': {
           const sentAt = this.pendingPings.get(msg.t);

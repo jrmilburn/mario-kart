@@ -11,6 +11,10 @@ export class Hud {
   private kbBadge: HTMLDivElement;
   private driftBar: HTMLDivElement;
   private driftFill: HTMLDivElement;
+  private raceInfo: HTMLDivElement;
+  private countdownEl: HTMLDivElement;
+  private pausedOverlay: HTMLDivElement;
+  private resultsPanel: HTMLDivElement;
 
   constructor(container: HTMLElement) {
     this.root = document.createElement('div');
@@ -63,6 +67,37 @@ export class Hud {
       'font-size:14px; padding:6px 16px; border-radius:999px; background:#c0392b;';
     this.peerEl.textContent = 'Waiting for phone…';
     this.lobbyPanel.appendChild(this.peerEl);
+
+    this.raceInfo = document.createElement('div');
+    this.raceInfo.style.cssText =
+      'position:absolute; top:12px; left:12px; font-size:22px; font-weight:700; ' +
+      'text-shadow:0 2px 6px rgba(0,0,0,0.6); display:none;';
+    this.root.appendChild(this.raceInfo);
+
+    this.countdownEl = document.createElement('div');
+    this.countdownEl.style.cssText =
+      'position:absolute; inset:0; display:none; align-items:center; justify-content:center; ' +
+      'font-size:160px; font-weight:900; text-shadow:0 4px 16px rgba(0,0,0,0.6);';
+    this.root.appendChild(this.countdownEl);
+
+    this.pausedOverlay = document.createElement('div');
+    this.pausedOverlay.style.cssText =
+      'position:absolute; inset:0; display:none; align-items:center; justify-content:center; ' +
+      'background:rgba(0,0,0,0.6); font-size:24px; text-align:center; padding:0 40px;';
+    this.pausedOverlay.textContent = 'Controller disconnected — reconnect phone or press K for keyboard';
+    this.root.appendChild(this.pausedOverlay);
+
+    this.resultsPanel = document.createElement('div');
+    this.resultsPanel.style.cssText =
+      'position:absolute; inset:0; display:none; flex-direction:column; align-items:center; ' +
+      'justify-content:center; gap:16px; background:rgba(0,0,0,0.6); font-size:32px; pointer-events:auto;';
+    const resultsTitle = document.createElement('div');
+    resultsTitle.textContent = '🏁 Race complete!';
+    const resultsHint = document.createElement('div');
+    resultsHint.style.cssText = 'font-size:16px; opacity:0.8;';
+    resultsHint.textContent = 'Press R or tap RESTART on your phone';
+    this.resultsPanel.append(resultsTitle, resultsHint);
+    this.root.appendChild(this.resultsPanel);
   }
 
   showRoom(code: string, joinUrl: string) {
@@ -107,5 +142,35 @@ export class Hud {
 
   showLobby() {
     this.lobbyPanel.style.display = 'flex';
+  }
+
+  setRaceInfo(lap: number, totalLaps: number, speedKmh: number) {
+    this.raceInfo.style.display = 'block';
+    this.raceInfo.textContent = `LAP ${Math.min(lap + 1, totalLaps)}/${totalLaps}   ${Math.round(speedKmh)} km/h`;
+  }
+
+  hideRaceInfo() {
+    this.raceInfo.style.display = 'none';
+  }
+
+  showCountdown(text: string) {
+    this.countdownEl.style.display = 'flex';
+    this.countdownEl.textContent = text;
+  }
+
+  hideCountdown() {
+    this.countdownEl.style.display = 'none';
+  }
+
+  setPaused(paused: boolean) {
+    this.pausedOverlay.style.display = paused ? 'flex' : 'none';
+  }
+
+  showResults() {
+    this.resultsPanel.style.display = 'flex';
+  }
+
+  hideResults() {
+    this.resultsPanel.style.display = 'none';
   }
 }

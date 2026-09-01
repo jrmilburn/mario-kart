@@ -1,3 +1,4 @@
+import type { EventName } from '../shared/protocol';
 import { ControllerSocket, getStoredRoomCode, type ConnectionStatus } from './ControllerSocket';
 import { TouchSteering } from './TouchSteering';
 
@@ -96,6 +97,68 @@ export function initControllerUI(root: HTMLElement) {
   playPanel.appendChild(sliderContainer);
   const steering = new TouchSteering(sliderContainer);
 
+  const raceOverlay = document.createElement('div');
+  raceOverlay.style.cssText =
+    'position:fixed; inset:0; display:none; flex-direction:column; align-items:center; ' +
+    'justify-content:center; gap:20px; background:rgba(0,0,0,0.6); z-index:10;';
+  root.appendChild(raceOverlay);
+
+  const raceStatusText = document.createElement('div');
+  raceStatusText.style.cssText = 'font-size:22px; text-align:center; padding:0 24px;';
+  raceOverlay.appendChild(raceStatusText);
+
+  const startBtn = document.createElement('button');
+  startBtn.textContent = 'START RACE';
+  startBtn.style.cssText =
+    'font-size:20px; font-weight:800; padding:18px 36px; border-radius:16px; border:none; ' +
+    'background:#27ae60; color:#fff;';
+  raceOverlay.appendChild(startBtn);
+
+  const restartBtn = document.createElement('button');
+  restartBtn.textContent = 'RESTART';
+  restartBtn.style.cssText =
+    'font-size:20px; font-weight:800; padding:18px 36px; border-radius:16px; border:none; ' +
+    'background:#2980b9; color:#fff;';
+  raceOverlay.appendChild(restartBtn);
+
+  let activeSocket: ControllerSocket | null = null;
+  startBtn.addEventListener('click', () => activeSocket?.sendEvent('start'));
+  restartBtn.addEventListener('click', () => activeSocket?.sendEvent('restart'));
+
+  function showRaceOverlay(text: string, showStart: boolean, showRestart: boolean) {
+    raceOverlay.style.display = 'flex';
+    raceStatusText.style.display = text ? 'block' : 'none';
+    raceStatusText.textContent = text;
+    startBtn.style.display = showStart ? 'block' : 'none';
+    restartBtn.style.display = showRestart ? 'block' : 'none';
+  }
+
+  function hideRaceOverlay() {
+    raceOverlay.style.display = 'none';
+  }
+
+  function handleRaceEvent(name: EventName) {
+    switch (name) {
+      case 'lobby':
+        showRaceOverlay('', true, false);
+        break;
+      case 'countdown':
+        showRaceOverlay('Get ready…', false, false);
+        break;
+      case 'go':
+        hideRaceOverlay();
+        break;
+      case 'paused':
+        showRaceOverlay('Paused', false, false);
+        break;
+      case 'finished':
+        showRaceOverlay('🏁 Finished!', false, true);
+        break;
+      case 'restart':
+        break; // a 'lobby' event immediately follows and resets the overlay
+    }
+  }
+
   function showCodeEntry(message: string) {
     codeEntryPanel.style.display = 'flex';
     playPanel.style.display = 'none';
@@ -108,7 +171,7 @@ export function initControllerUI(root: HTMLElement) {
   }
 
   function join(code: string) {
-    new ControllerSocket(
+    activeSocket = new ControllerSocket(
       code,
       () => ({
         steer: steering.steer,
@@ -123,7 +186,10 @@ export function initControllerUI(root: HTMLElement) {
           pill.textContent = text;
           pill.style.background = color;
         },
-        onJoined: () => showPlay(),
+        onJoined: () => {
+          showPlay();
+          showRaceOverlay('', true, false); // default to the lobby/START state until an event says otherwise
+        },
         onJoinError: (reason) => {
           showCodeEntry(
             reason === 'room-full'
@@ -132,6 +198,7 @@ export function initControllerUI(root: HTMLElement) {
           );
         },
         onGameLeft: () => showCodeEntry('Game closed. Enter a new code to reconnect.'),
+        onEvent: handleRaceEvent,
       },
     );
   }

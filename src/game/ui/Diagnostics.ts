@@ -3,6 +3,9 @@ export interface DiagnosticsData {
   inputAgeMs: number | null;
   seq: number | null;
   source: string;
+  raceState?: string;
+  lap?: number;
+  nextCheckpoint?: number;
 }
 
 // Backtick-toggle overlay: fps, RTT, input age, seq (§Phase 1).
@@ -45,6 +48,9 @@ export class Diagnostics {
       `rtt: ${data.rttMs !== null ? data.rttMs.toFixed(0) + 'ms' : '-'}\n` +
       `input age: ${data.inputAgeMs !== null ? data.inputAgeMs.toFixed(0) + 'ms' : '-'}\n` +
       `seq: ${data.seq ?? '-'}\n` +
-      `source: ${data.source}`;
+      `source: ${data.source}\n` +
+      `race: ${data.raceState ?? '-'}\n` +
+      `lap: ${data.lap ?? '-'}\n` +
+      `nextCheckpoint: ${data.nextCheckpoint ?? '-'}`;
   }
 }

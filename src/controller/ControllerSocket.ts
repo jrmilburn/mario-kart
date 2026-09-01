@@ -154,6 +154,10 @@ export class ControllerSocket {
     }
   }
 
+  sendEvent(name: EventName) {
+    this.sendRaw({ type: 'event', name });
+  }
+
   private sendRaw(msg: ControllerToServer) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));

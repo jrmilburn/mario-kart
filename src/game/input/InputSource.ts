@@ -82,7 +82,7 @@ export class InputSource {
     return { steer, throttle: throttle as 0 | 1, brake: brake as 0 | 1, drift: drift as 0 | 1 };
   }
 
-  private isKeyboardActive(now: number): boolean {
+  isKeyboardActive(now: number): boolean {
     return now - this.lastKeyboardActivityAt < KEYBOARD_OVERRIDE_MS;
   }
 
@@ -95,6 +95,13 @@ export class InputSource {
       return { steer: s.steer, throttle: s.throttle, brake: s.brake, drift: s.drift };
     }
     return NEUTRAL;
+  }
+
+  // Raw controller snapshot age, independent of keyboard override — used by
+  // RaceDirector's pause-on-disconnect watchdog (§3.6), which cares about the
+  // phone's connectivity regardless of whether keyboard is currently driving.
+  rawControllerAgeMs(now: number = performance.now()): number | null {
+    return this.latestSnapshot ? now - this.latestReceivedAt : null;
   }
 
   diagnostics(now: number = performance.now()): InputDiagnostics {

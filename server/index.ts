@@ -161,6 +161,11 @@ wss.on('connection', (socket, req) => {
       if (room.controllerSocket) send(room.controllerSocket, msg);
       return;
     }
+
+    if (state.role === 'controller' && msg.type === 'event') {
+      if (room.gameSocket) send(room.gameSocket, msg);
+      return;
+    }
   });
 
   socket.on('close', () => {

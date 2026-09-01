@@ -47,7 +47,9 @@ export interface PeerMessage {
   event: 'controller-joined' | 'controller-left' | 'game-left';
 }
 
-export type EventName = 'lobby' | 'countdown' | 'go' | 'paused' | 'finished' | 'restart';
+// game -> controller: state announcements. controller -> game: 'start' (START
+// button/Enter) and 'restart' (restart button/R) are commands relayed verbatim.
+export type EventName = 'lobby' | 'countdown' | 'go' | 'paused' | 'finished' | 'restart' | 'start';
 
 export interface EventMessage {
   type: 'event';
@@ -65,7 +67,7 @@ export interface PongMessage {
 }
 
 // Messages a controller socket may send to the server.
-export type ControllerToServer = ControllerHello | InputSnapshot | PingMessage;
+export type ControllerToServer = ControllerHello | InputSnapshot | PingMessage | EventMessage;
 
 // Messages a game socket may send to the server.
 export type GameToServer = GameHello | EventMessage | PingMessage;
@@ -74,7 +76,7 @@ export type GameToServer = GameHello | EventMessage | PingMessage;
 export type ServerToController = JoinedMessage | ErrorMessage | PeerMessage | EventMessage | PongMessage;
 
 // Messages the server may send to a game socket.
-export type ServerToGame = RoomMessage | PeerMessage | InputSnapshot | PongMessage;
+export type ServerToGame = RoomMessage | PeerMessage | InputSnapshot | EventMessage | PongMessage;
 
 export type AnyMessage =
   | HelloMessage
@@ -157,7 +159,7 @@ export function isPeerMessage(m: unknown): m is PeerMessage {
   return o.event === 'controller-joined' || o.event === 'controller-left' || o.event === 'game-left';
 }
 
-const EVENT_NAMES: EventName[] = ['lobby', 'countdown', 'go', 'paused', 'finished', 'restart'];
+const EVENT_NAMES: EventName[] = ['lobby', 'countdown', 'go', 'paused', 'finished', 'restart', 'start'];
 
 export function isEventMessage(m: unknown): m is EventMessage {
   const o = m as Partial<EventMessage>;
