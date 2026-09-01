@@ -114,14 +114,14 @@ export function initControllerUI(root: HTMLElement) {
   let steerMode: 'touch' | 'tilt' = 'touch';
 
   const wheelContainer = document.createElement('div');
-  wheelContainer.style.cssText = 'display:none; align-items:center; justify-content:center; height:100px;';
+  wheelContainer.style.cssText = 'display:none; align-items:center; justify-content:center; height:120px;';
   playPanel.appendChild(wheelContainer);
   const wheelDial = document.createElement('div');
-  wheelDial.style.cssText = 'width:90px; height:90px; border-radius:50%; border:8px solid #fff; position:relative;';
+  wheelDial.style.cssText = 'width:110px; height:110px; border-radius:50%; border:8px solid #fff; position:relative;';
   wheelContainer.appendChild(wheelDial);
   const wheelSpoke = document.createElement('div');
   wheelSpoke.style.cssText =
-    'position:absolute; top:2px; left:50%; width:4px; height:43px; background:#fff; ' +
+    'position:absolute; top:2px; left:50%; width:4px; height:53px; background:#fff; ' +
     'transform-origin:bottom center; transform:translateX(-50%);';
   wheelDial.appendChild(wheelSpoke);
 
@@ -133,17 +133,47 @@ export function initControllerUI(root: HTMLElement) {
   leftCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px; align-items:stretch;';
   controlsRow.appendChild(leftCluster);
 
-  const itemBtn = makeHoldButton('ITEM', '#f39c12', 'width:120px; height:64px;');
-  const brakeBtn = makeHoldButton('BRAKE', '#c0392b', 'width:120px; height:80px;');
-  leftCluster.append(itemBtn.el, brakeBtn.el);
-
   const rightCluster = document.createElement('div');
   rightCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px; align-items:stretch;';
   controlsRow.appendChild(rightCluster);
 
-  const driftBtn = makeHoldButton('DRIFT', '#8e44ad', 'width:140px; height:64px;');
-  const throttleBtn = makeHoldButton('GO', '#27ae60', 'width:140px; height:96px; font-size:20px;');
-  rightCluster.append(driftBtn.el, throttleBtn.el);
+  const itemBtn = makeHoldButton('ITEM', '#f39c12');
+  const brakeBtn = makeHoldButton('BRAKE', '#c0392b');
+  const driftBtn = makeHoldButton('DRIFT', '#8e44ad');
+  const throttleBtn = makeHoldButton('GO', '#27ae60');
+
+  // Touch mode: BRAKE bottom-left; DRIFT+GO stacked bottom-right (GO largest,
+  // at the corner the right thumb rests on) — steering is the full-width slider.
+  // Tilt mode: steering is handled by the wheel, freeing both thumbs for one
+  // big button each — DRIFT (left) and GO (right, the primary action) — with
+  // the secondary REVERSE tucked small underneath GO, mirrored by ITEM under DRIFT.
+  function applyButtonLayoutForMode(mode: 'touch' | 'tilt') {
+    if (mode === 'touch') {
+      leftCluster.append(itemBtn.el, brakeBtn.el);
+      rightCluster.append(driftBtn.el, throttleBtn.el);
+      brakeBtn.el.textContent = 'BRAKE';
+      setButtonSize(itemBtn.el, 120, 64, 16);
+      setButtonSize(brakeBtn.el, 120, 80, 16);
+      setButtonSize(driftBtn.el, 140, 64, 16);
+      setButtonSize(throttleBtn.el, 140, 96, 20);
+    } else {
+      leftCluster.append(driftBtn.el, itemBtn.el);
+      rightCluster.append(throttleBtn.el, brakeBtn.el);
+      brakeBtn.el.textContent = 'REVERSE';
+      setButtonSize(driftBtn.el, 156, 124, 22);
+      setButtonSize(itemBtn.el, 156, 52, 14);
+      setButtonSize(throttleBtn.el, 156, 156, 28);
+      setButtonSize(brakeBtn.el, 156, 52, 14);
+    }
+  }
+
+  function setButtonSize(el: HTMLButtonElement, width: number, height: number, fontSize: number) {
+    el.style.width = `${width}px`;
+    el.style.height = `${height}px`;
+    el.style.fontSize = `${fontSize}px`;
+  }
+
+  applyButtonLayoutForMode('touch');
 
   const recalibrateBtn = document.createElement('button');
   recalibrateBtn.textContent = '⟳';
@@ -210,6 +240,7 @@ export function initControllerUI(root: HTMLElement) {
     wheelContainer.style.display = 'none';
     recalibrateBtn.style.display = 'none';
     modeToggle.textContent = '🎮 TOUCH';
+    applyButtonLayoutForMode('touch');
   }
 
   function switchToTilt() {
@@ -218,6 +249,7 @@ export function initControllerUI(root: HTMLElement) {
     wheelContainer.style.display = 'flex';
     recalibrateBtn.style.display = 'block';
     modeToggle.textContent = '🎡 TILT';
+    applyButtonLayoutForMode('tilt');
   }
 
   function openCalibration() {
