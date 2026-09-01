@@ -12,6 +12,7 @@ export interface TrackSample {
   forward: THREE.Vector3;
   right: THREE.Vector3;
   s: number;
+  grade: number; // §Phase 5 item 2: forward.y -- slope along the track direction, +up
 }
 
 export interface TrackData {
@@ -28,6 +29,7 @@ const WALL_HEIGHT = 1.2;
 const TEXTURE_V_SCALE = 8; // meters of arc length per texture repeat, longitudinally (§Phase 4 item 1)
 
 const UP = new THREE.Vector3(0, 1, 0);
+const MAX_SAMPLE_GRADE = 0.12; // §Phase 5 item 1: dev-time budget for adjacent-sample |dy/ds|
 
 function findIndexForS(cum: number[], targetS: number): number {
   let lo = 0;
@@ -54,22 +56,53 @@ function buildSamples(): { samples: TrackSample[]; totalLength: number } {
   for (let i = 0; i < SAMPLE_COUNT; i++) {
     const targetS = (i / SAMPLE_COUNT) * totalLength;
     const idx = findIndexForS(cum, targetS);
-    samples.push({ pos: raw[idx].clone(), s: targetS, forward: new THREE.Vector3(), right: new THREE.Vector3() });
+    samples.push({ pos: raw[idx].clone(), s: targetS, forward: new THREE.Vector3(), right: new THREE.Vector3(), grade: 0 });
   }
 
   // forward/right computed from neighbor samples once all positions are known.
   // NOTE: our kart heading convention is forward = (sin(h), 0, cos(h)) (see
   // physics/Kart.ts kartForward), for which "driver's right" is up x forward
   // (not forward x up as it would be for a forward = (0,0,-1)-at-rest convention).
+  // §Phase 5 item 2: `forward` is taken from the full 3D neighbor positions
+  // (so it carries the local grade), but `right` is explicitly built from
+  // forward's *horizontal* projection so it stays perfectly level (no
+  // banking, out of scope) regardless of slope -- banking would otherwise
+  // creep in because UP x forward's magnitude depends on forward's pitch even
+  // though its direction happens to already be horizontal.
   for (let i = 0; i < SAMPLE_COUNT; i++) {
     const prev = samples[(i - 1 + SAMPLE_COUNT) % SAMPLE_COUNT].pos;
     const next = samples[(i + 1) % SAMPLE_COUNT].pos;
     const forward = next.clone().sub(prev).normalize();
+    const horizontalForward = new THREE.Vector3(forward.x, 0, forward.z).normalize();
     samples[i].forward = forward;
-    samples[i].right = UP.clone().cross(forward).normalize();
+    samples[i].right = UP.clone().cross(horizontalForward).normalize();
+    samples[i].grade = forward.y;
   }
 
+  checkGradeSafety(samples, totalLength);
+
   return { samples, totalLength };
+}
+
+// §Phase 5 item 1: dev-time sanity check on the authored heights -- warns
+// (doesn't throw) if the Catmull-Rom-smoothed per-sample slope ever exceeds
+// the ~10% grade budget by a meaningful margin, catching an over-steep
+// control-point edit before it ships. Wrap-aware at the start/finish seam.
+function checkGradeSafety(samples: TrackSample[], totalLength: number) {
+  const n = samples.length;
+  for (let i = 0; i < n; i++) {
+    const a = samples[i];
+    const b = samples[(i + 1) % n];
+    const dy = b.pos.y - a.pos.y;
+    let ds = b.s - a.s;
+    if (ds <= 0) ds += totalLength; // wrap at the seam (n-1 -> 0)
+    const grade = ds > 0 ? Math.abs(dy / ds) : 0;
+    if (grade > MAX_SAMPLE_GRADE) {
+      console.warn(
+        `[trackData] adjacent-sample grade ${grade.toFixed(3)} exceeds ${MAX_SAMPLE_GRADE} budget near s=${a.s.toFixed(1)}m`,
+      );
+    }
+  }
 }
 
 // u = signed lateral offset in meters / TEXTURE_V_SCALE; v = arc length /
@@ -299,19 +332,23 @@ function buildStartFinish(sample0: TrackSample): THREE.Group {
   const beamGeo = new THREE.BoxGeometry(ROAD_HALF * 2 + 1.2, 0.6, 0.6);
   const beamMat = new THREE.MeshLambertMaterial({ color: 0xdd2222 });
 
+  // §Phase 5 item 2: pillar/beam heights are offsets *above local track
+  // height* (pos.y), not absolute world y -- small hills mean per-quad y from
+  // its own sample is sufficient (no interpolation needed across the arch's
+  // ~1m footprint).
   const leftPillar = new THREE.Mesh(pillarGeo, pillarMat);
   leftPillar.position.copy(pos).addScaledVector(right, -ROAD_HALF - 0.3);
-  leftPillar.position.y = 2.5;
+  leftPillar.position.y = pos.y + 2.5;
   group.add(leftPillar);
 
   const rightPillar = new THREE.Mesh(pillarGeo, pillarMat);
   rightPillar.position.copy(pos).addScaledVector(right, ROAD_HALF + 0.3);
-  rightPillar.position.y = 2.5;
+  rightPillar.position.y = pos.y + 2.5;
   group.add(rightPillar);
 
   const beam = new THREE.Mesh(beamGeo, beamMat);
   beam.position.copy(pos);
-  beam.position.y = 5;
+  beam.position.y = pos.y + 5;
   beam.rotation.y = Math.atan2(forward.x, forward.z);
   group.add(beam);
 
@@ -343,15 +380,17 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   const topMesh = new THREE.InstancedMesh(topGeo, topMat, treeIndices.length);
   topMesh.castShadow = true; // §Phase 4 item 3
 
+  // §Phase 5 item 2: translations are pos.y + a local offset, not an absolute
+  // world y -- otherwise trees near the hill would float or bury themselves.
   const m = new THREE.Matrix4();
   treeIndices.forEach((idx, i) => {
     const side = i % 2 === 0 ? 1 : -1;
     const sample = samples[idx];
     const offset = GRASS_HALF + 3 + (i % 3);
     const pos = sample.pos.clone().addScaledVector(sample.right, side * offset);
-    m.makeTranslation(pos.x, 0.6, pos.z);
+    m.makeTranslation(pos.x, pos.y + 0.6, pos.z);
     trunkMesh.setMatrixAt(i, m);
-    m.makeTranslation(pos.x, 1.2 + 1.1, pos.z);
+    m.makeTranslation(pos.x, pos.y + 1.2 + 1.1, pos.z);
     topMesh.setMatrixAt(i, m);
   });
   trunkMesh.instanceMatrix.needsUpdate = true;
@@ -370,7 +409,7 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
     const side = i % 2 === 0 ? -1 : 1;
     const sample = samples[idx];
     const pos = sample.pos.clone().addScaledVector(sample.right, side * (ROAD_HALF + 1.5));
-    m.makeTranslation(pos.x, 0.5, pos.z);
+    m.makeTranslation(pos.x, pos.y + 0.5, pos.z);
     coneMesh.setMatrixAt(i, m);
   });
   coneMesh.instanceMatrix.needsUpdate = true;

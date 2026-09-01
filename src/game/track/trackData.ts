@@ -7,21 +7,33 @@ import * as THREE from 'three';
 // loop (verified via a throwaway arc-length clearance script: no two of the
 // 600 rendered samples more than 40m apart along the track are ever closer
 // than 2*GRASS_HALF+2 = 30m in x/z; worst case ~33.7m).
+//
+// §Phase 5 item 1: y values authored on top of the flat Phase 4 layout —
+// physics stays 2D-projected (x/z only), y is purely a visual/height query
+// concern layered on afterward (see TrackBuilder/TrackQuery/main.ts). Profile:
+// flat start/finish straight (0/1 pinned at y=0 so the grid start is level),
+// a gentle dip through the double-apex (2-6), climbing through the connecting
+// curve and esses (7-10) to an ~8m crest right where the esses feed onto the
+// back straight (11), a long gentle descent down the back straight into the
+// braking zone (12-13), and level again through the hairpin and back to the
+// line (14-17). Control-point-to-point grades top out ~5.3% (esses climb),
+// well under the ~10% budget — see buildSamples' dev-time grade assertion for
+// the actual worst per-sample figure once Catmull-Rom smoothing is applied.
 export const CONTROL_POINTS: THREE.Vector3[] = [
   new THREE.Vector3(0, 0, 0), // 0 start/finish
   new THREE.Vector3(0, 0, 101.84), // 1 end of long start straight
-  new THREE.Vector3(9.32, 0, 127.31), // 2 double-apex turn-in
-  new THREE.Vector3(36.02, 0, 142.83), // 3 double-apex, apex 1
-  new THREE.Vector3(62.1, 0, 136.62), // 4 double-apex, easing between apexes
-  new THREE.Vector3(91.91, 0, 145.94), // 5 double-apex, apex 2
-  new THREE.Vector3(116.75, 0, 124.2), // 6 double-apex exit
-  new THREE.Vector3(96.26, 0, 86.94), // 7 connecting curve into the esses
-  new THREE.Vector3(82.8, 0, 62.1), // 8 esses entry
-  new THREE.Vector3(62.93, 0, 28.98), // 9 esses kink 1
-  new THREE.Vector3(87.77, 0, -4.14), // 10 esses kink 2
-  new THREE.Vector3(80.32, 0, -45.54), // 11 esses exit, entering the back straight
-  new THREE.Vector3(80.24, 0, -225.9), // 12 long back straight
-  new THREE.Vector3(55.04, 0, -261.9), // 13 braking zone into the hairpin
+  new THREE.Vector3(9.32, -0.5, 127.31), // 2 double-apex turn-in
+  new THREE.Vector3(36.02, -1.5, 142.83), // 3 double-apex, apex 1
+  new THREE.Vector3(62.1, -1.0, 136.62), // 4 double-apex, easing between apexes
+  new THREE.Vector3(91.91, -1.8, 145.94), // 5 double-apex, apex 2
+  new THREE.Vector3(116.75, -1.0, 124.2), // 6 double-apex exit
+  new THREE.Vector3(96.26, 0.5, 86.94), // 7 connecting curve into the esses
+  new THREE.Vector3(82.8, 2.0, 62.1), // 8 esses entry
+  new THREE.Vector3(62.93, 4.0, 28.98), // 9 esses kink 1
+  new THREE.Vector3(87.77, 6.0, -4.14), // 10 esses kink 2
+  new THREE.Vector3(80.32, 8.0, -45.54), // 11 esses exit, entering the back straight -- crest of the hill
+  new THREE.Vector3(80.24, 2.0, -225.9), // 12 long back straight -- gentle descent
+  new THREE.Vector3(55.04, 1.0, -261.9), // 13 braking zone into the hairpin
   new THREE.Vector3(15.44, 0, -272.7), // 14 hairpin apex
   new THREE.Vector3(-15.3, 0, -198), // 15 hairpin exit
   new THREE.Vector3(-22.2, 0, -149), // 16 sweeping back toward the start
