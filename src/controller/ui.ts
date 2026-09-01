@@ -11,6 +11,8 @@ const STATUS_STYLE: Record<ConnectionStatus, [string, string]> = {
   reconnecting: ['reconnecting…', '#c0392b'],
 };
 
+const AUTO_THROTTLE_STORAGE_KEY = 'kart.controller.autoThrottle';
+
 function makeHoldButton(label: string, color: string, extraStyle = '') {
   const btn = document.createElement('button');
   btn.textContent = label;
@@ -63,6 +65,11 @@ export function initControllerUI(root: HTMLElement) {
     'padding:4px 10px; border-radius:999px; font-size:11px; font-weight:700; border:none; background:#34495e; color:#fff;';
   statusGroup.appendChild(modeToggle);
 
+  const autoThrottleToggle = document.createElement('button');
+  autoThrottleToggle.style.cssText =
+    'padding:4px 10px; border-radius:999px; font-size:11px; font-weight:700; border:none; color:#fff;';
+  statusGroup.appendChild(autoThrottleToggle);
+
   const rttText = document.createElement('div');
   rttText.style.cssText = 'font-size:12px; opacity:0.7; font-variant-numeric:tabular-nums;';
   statusGroup.appendChild(rttText);
@@ -114,6 +121,14 @@ export function initControllerUI(root: HTMLElement) {
   let steerMode: 'touch' | 'tilt' = 'touch';
   let tiltAutoAttempted = false;
 
+  // Auto-throttle: default OFF in touch, ON once tilt actually activates —
+  // but frozen at whatever the user last explicitly chose, once they've
+  // touched the toggle, so the persisted preference stays meaningful across
+  // mode switches.
+  const storedAutoThrottle = localStorage.getItem(AUTO_THROTTLE_STORAGE_KEY);
+  let autoThrottleUserSet = storedAutoThrottle !== null;
+  let autoThrottle = storedAutoThrottle !== null ? storedAutoThrottle === '1' : false;
+
   const wheelContainer = document.createElement('div');
   wheelContainer.style.cssText = 'display:none; align-items:center; justify-content:center; height:120px;';
   playPanel.appendChild(wheelContainer);
@@ -146,39 +161,58 @@ export function initControllerUI(root: HTMLElement) {
   // Touch mode: BRAKE bottom-left; DRIFT+GO stacked bottom-right (GO largest,
   // at the corner the right thumb rests on) — steering is the full-width slider.
   // Fixed pixel sizes here are fine since the slider above already claims most
-  // of the vertical space.
+  // of the vertical space. With auto-throttle ON, GO is dropped entirely and
+  // DRIFT is promoted to GO's old primary-corner size/position.
   //
   // Tilt mode: steering is handled by the wheel, freeing both thumbs for one
-  // big button each — DRIFT (left) and GO (right, the primary action) — with
-  // the secondary REVERSE tucked small underneath GO, mirrored by ITEM under
-  // DRIFT. These use flex-grow sizing (not fixed px) so the cluster stretches
-  // to fill the phone's full remaining height edge-to-edge regardless of
-  // screen size, instead of overflowing off the bottom on shorter phones.
-  function applyButtonLayoutForMode(mode: 'touch' | 'tilt') {
+  // big button each. With auto-throttle OFF, that's DRIFT (left) and GO
+  // (right, the primary action), with the secondary REVERSE tucked small
+  // underneath GO, mirrored by ITEM under DRIFT. With auto-throttle ON, GO is
+  // dropped (throttle is computed automatically) leaving three huge buttons:
+  // DRIFT alone on the left, ITEM+REVERSE stacked on the right. These use
+  // flex-grow sizing (not fixed px) so the cluster stretches to fill the
+  // phone's full remaining height edge-to-edge regardless of screen size,
+  // instead of overflowing off the bottom on shorter phones.
+  function applyButtonLayoutForMode(mode: 'touch' | 'tilt', autoThrottle: boolean) {
+    throttleBtn.el.remove(); // re-appended below only when this mode/autoThrottle combo uses it
+
     if (mode === 'touch') {
       controlsRow.style.flex = '0 0 auto';
       controlsRow.style.alignItems = 'flex-end';
       leftCluster.style.flex = '0 0 auto';
       rightCluster.style.flex = '0 0 auto';
       leftCluster.append(itemBtn.el, brakeBtn.el);
-      rightCluster.append(driftBtn.el, throttleBtn.el);
       brakeBtn.el.textContent = 'BRAKE';
       setFixedButtonSize(itemBtn.el, 120, 64, 16);
       setFixedButtonSize(brakeBtn.el, 120, 80, 16);
-      setFixedButtonSize(driftBtn.el, 140, 64, 16);
-      setFixedButtonSize(throttleBtn.el, 140, 96, 20);
+      if (autoThrottle) {
+        rightCluster.append(driftBtn.el);
+        setFixedButtonSize(driftBtn.el, 140, 96, 20); // takes GO's old primary-corner size
+      } else {
+        rightCluster.append(driftBtn.el, throttleBtn.el);
+        setFixedButtonSize(driftBtn.el, 140, 64, 16);
+        setFixedButtonSize(throttleBtn.el, 140, 96, 20);
+      }
     } else {
       controlsRow.style.flex = '1';
       controlsRow.style.alignItems = 'stretch';
       leftCluster.style.flex = '1';
       rightCluster.style.flex = '1';
-      leftCluster.append(driftBtn.el, itemBtn.el);
-      rightCluster.append(throttleBtn.el, brakeBtn.el);
       brakeBtn.el.textContent = 'REVERSE';
-      setFlexButtonSize(driftBtn.el, 5, 26);
-      setFlexButtonSize(itemBtn.el, 2, 16);
-      setFlexButtonSize(throttleBtn.el, 3, 28);
-      setFlexButtonSize(brakeBtn.el, 1, 16);
+      if (autoThrottle) {
+        leftCluster.append(driftBtn.el);
+        rightCluster.append(itemBtn.el, brakeBtn.el);
+        setFlexButtonSize(driftBtn.el, 4, 30);
+        setFlexButtonSize(itemBtn.el, 3, 28);
+        setFlexButtonSize(brakeBtn.el, 1, 16);
+      } else {
+        leftCluster.append(driftBtn.el, itemBtn.el);
+        rightCluster.append(throttleBtn.el, brakeBtn.el);
+        setFlexButtonSize(driftBtn.el, 5, 28); // bumped 26->28 to meet the grow>=3 => >=28px rule
+        setFlexButtonSize(itemBtn.el, 2, 16);
+        setFlexButtonSize(throttleBtn.el, 3, 28);
+        setFlexButtonSize(brakeBtn.el, 1, 16);
+      }
     }
   }
 
@@ -196,7 +230,7 @@ export function initControllerUI(root: HTMLElement) {
     el.style.fontSize = `${fontSize}px`;
   }
 
-  applyButtonLayoutForMode('touch');
+  applyButtonLayoutForMode('touch', autoThrottle);
 
   const recalibrateBtn = document.createElement('button');
   recalibrateBtn.textContent = '⟳';
@@ -264,6 +298,27 @@ export function initControllerUI(root: HTMLElement) {
   calibrationPanel.appendChild(setBtn);
   root.appendChild(calibrationPanel);
 
+  // Auto-throttle toggle: default OFF in touch / ON in tilt, but that default
+  // only applies until the user explicitly touches the toggle themselves —
+  // after that their choice sticks (and persists) across mode switches.
+  function renderAutoThrottleToggle() {
+    autoThrottleToggle.textContent = autoThrottle ? '🚀 AUTO' : '🖐 MANUAL';
+    autoThrottleToggle.style.background = autoThrottle ? '#27ae60' : '#34495e';
+  }
+
+  function setAutoThrottle(value: boolean, userInitiated: boolean) {
+    autoThrottle = value;
+    if (userInitiated) {
+      autoThrottleUserSet = true;
+      localStorage.setItem(AUTO_THROTTLE_STORAGE_KEY, value ? '1' : '0');
+    }
+    renderAutoThrottleToggle();
+    applyButtonLayoutForMode(steerMode, autoThrottle);
+  }
+
+  autoThrottleToggle.addEventListener('click', () => setAutoThrottle(!autoThrottle, true));
+  renderAutoThrottleToggle();
+
   function switchToTouch() {
     steerMode = 'touch';
     tiltSteering.detach();
@@ -271,7 +326,8 @@ export function initControllerUI(root: HTMLElement) {
     wheelContainer.style.display = 'none';
     recalibrateBtn.style.display = 'none';
     modeToggle.textContent = '🎮 TOUCH';
-    applyButtonLayoutForMode('touch');
+    if (!autoThrottleUserSet) setAutoThrottle(false, false);
+    else applyButtonLayoutForMode('touch', autoThrottle);
   }
 
   function switchToTilt() {
@@ -280,7 +336,8 @@ export function initControllerUI(root: HTMLElement) {
     wheelContainer.style.display = 'flex';
     recalibrateBtn.style.display = 'block';
     modeToggle.textContent = '🎡 TILT';
-    applyButtonLayoutForMode('tilt');
+    if (!autoThrottleUserSet) setAutoThrottle(true, false);
+    else applyButtonLayoutForMode('tilt', autoThrottle);
   }
 
   function openCalibration() {
@@ -445,7 +502,7 @@ export function initControllerUI(root: HTMLElement) {
       code,
       () => ({
         steer: steerMode === 'tilt' ? tiltSteering.steer : steering.steer,
-        throttle: throttleBtn.active,
+        throttle: autoThrottle ? (brakeBtn.active ? 0 : 1) : throttleBtn.active,
         brake: brakeBtn.active,
         drift: driftBtn.active,
         item: itemBtn.active,
