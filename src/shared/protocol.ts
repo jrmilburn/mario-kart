@@ -59,8 +59,15 @@ export interface PeerMessage {
 }
 
 // game -> controller: state announcements, plus 'boost'/'collision' haptic
-// cues (§Phase 11d). controller -> game: 'start' (START button/Enter) and
-// 'restart' (restart button/R) are commands relayed verbatim.
+// cues (§Phase 11d) and the 'item-ready'/'item-clear' possession cues (§v3
+// Track C1). controller -> game: 'start' (START button/Enter) and 'restart'
+// (restart button/R) are commands relayed verbatim.
+//
+// §v3 Track C1: 'item-ready'/'item-clear' are *slot-targeted* game->controller
+// events — each phone only lights its own ITEM button, so they always carry a
+// slot (the server's game->controller relay routes by `slot`, falling back to
+// a broadcast when it's omitted; see server/index.ts). They fire on the rising
+// and falling edge of "this player holds an item", not every tick.
 export type EventName =
   | 'lobby'
   | 'countdown'
@@ -70,7 +77,9 @@ export type EventName =
   | 'restart'
   | 'start'
   | 'boost'
-  | 'collision';
+  | 'collision'
+  | 'item-ready'
+  | 'item-clear';
 
 export interface EventMessage {
   type: 'event';
@@ -231,6 +240,9 @@ export function isPeerMessage(m: unknown): m is PeerMessage {
   );
 }
 
+// Runtime validator mirror of EventName. A name missing from here is dropped
+// silently by parseMessage on BOTH hops (controller and game), so every
+// addition to the union above must be added here too (§v3 Track C1).
 const EVENT_NAMES: EventName[] = [
   'lobby',
   'countdown',
@@ -241,6 +253,8 @@ const EVENT_NAMES: EventName[] = [
   'start',
   'boost',
   'collision',
+  'item-ready',
+  'item-clear',
 ];
 
 export function isEventMessage(m: unknown): m is EventMessage {

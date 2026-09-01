@@ -125,6 +125,18 @@ export interface KartChassis {
   seatY: number;
   seatZ: number;
   bodyPivotY: number; // body group height, i.e. the roll pivot
+  // §v3 Track C2: this profile's tail plane (ground-space local z, negative).
+  // Read-only, published purely so the boost flare can start exactly at this
+  // kart's tail — the profiles differ by 0.22m front to back, which is enough
+  // for a fixed offset to leave a visible gap behind `mini` or bury the flame
+  // inside `heavy`.
+  rearZ: number;
+  exhaustY: number; // ground-space y of the exhaust stack outlets, for the same reason
+  // §v3 Track C review fix: the x offsets of this profile's exhaust stacks (1
+  // on slim/mini, 2 on standard/royal/buggy, 4 on heavy). The boost flare used
+  // to hard-code ±0.2 and so plumed out of blank bodywork on four of the six
+  // karts; it now places one plume per stack from this array.
+  exhausts: readonly number[];
 }
 
 type ChassisPart = 'shell' | 'accent' | 'frame' | 'metal' | 'seat';
@@ -325,6 +337,11 @@ export function buildKartChassis(def: CharacterDef): KartChassis {
     seatY: p.seatY,
     seatZ: p.seatZ,
     bodyPivotY,
+    rearZ: p.rearZ,
+    // The exhaust `limb` above ends at floorY + 0.40; the flare plumes out of
+    // that same height, at each stack's own x.
+    exhaustY: p.floorY + 0.4,
+    exhausts: p.exhausts,
   };
 
   // --- wheels ---------------------------------------------------------------

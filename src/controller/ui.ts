@@ -14,16 +14,53 @@ const STATUS_STYLE: Record<ConnectionStatus, [string, string]> = {
 
 const AUTO_THROTTLE_STORAGE_KEY = 'kart.controller.autoThrottle';
 
-function makeHoldButton(label: string, color: string, extraStyle = '') {
+// §v3 Track C1: the ITEM button needs a lit/dim look, which means a keyframed
+// glow pulse — not expressible inline. The controller has no stylesheet
+// either, so (mirroring PlayerHud) one <style> element is injected once.
+const CONTROLLER_STYLE_ELEMENT_ID = 'kart-controller-styles';
+
+function ensureControllerStyles() {
+  if (document.getElementById(CONTROLLER_STYLE_ELEMENT_ID)) return;
+  const style = document.createElement('style');
+  style.id = CONTROLLER_STYLE_ELEMENT_ID;
+  style.textContent = `
+@keyframes kartItemLit {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(243,156,18,0.55); }
+  50% { box-shadow: 0 0 18px 4px rgba(243,156,18,0.75); }
+}
+`;
+  document.head.appendChild(style);
+}
+
+// `dimmable` (§v3 Track C1) opts a button into the lit/dim treatment used by
+// ITEM: it starts DIM (desaturated, faded, no glow) and only comes alive when
+// the game says this phone is actually holding something. Every other button
+// keeps its original behaviour — always lit, opacity is purely the press
+// feedback — because a permanently-glowing GO button would say nothing.
+function makeHoldButton(label: string, color: string, extraStyle = '', dimmable = false) {
   const btn = document.createElement('button');
   btn.textContent = label;
   btn.style.cssText =
     `border-radius:16px; border:none; font-size:16px; font-weight:700; ` +
     `color:#fff; background:${color}; touch-action:none; ${extraStyle}`;
   let active = false;
+  let lit = !dimmable;
+  // One place that resolves press-state + lit-state into the final look, so
+  // the two can't clobber each other (pressing a dim ITEM button used to just
+  // reset opacity to 1 and lose the dim entirely).
+  const render = () => {
+    if (!dimmable) {
+      btn.style.opacity = active ? '0.6' : '1';
+      return;
+    }
+    btn.style.opacity = active ? '0.55' : lit ? '1' : '0.4';
+    btn.style.filter = lit ? 'none' : 'saturate(0.2) brightness(0.8)';
+    btn.style.animation = lit && !active ? 'kartItemLit 1.4s ease-in-out infinite' : 'none';
+    if (!lit || active) btn.style.boxShadow = 'none';
+  };
   const setActive = (v: boolean) => {
     active = v;
-    btn.style.opacity = v ? '0.6' : '1';
+    render();
   };
   btn.addEventListener('pointerdown', (e) => {
     btn.setPointerCapture(e.pointerId);
@@ -31,16 +68,23 @@ function makeHoldButton(label: string, color: string, extraStyle = '') {
   });
   btn.addEventListener('pointerup', () => setActive(false));
   btn.addEventListener('pointercancel', () => setActive(false));
+  render();
   return {
     el: btn,
     get active(): 0 | 1 {
       return active ? 1 : 0;
+    },
+    setLit(v: boolean) {
+      if (lit === v) return; // re-declaring `animation` every call would restart the pulse
+      lit = v;
+      render();
     },
   };
 }
 
 export function initControllerUI(root: HTMLElement) {
   root.innerHTML = '';
+  ensureControllerStyles();
 
   const wrapper = document.createElement('div');
   wrapper.style.cssText =
@@ -160,7 +204,10 @@ export function initControllerUI(root: HTMLElement) {
   rightCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px;';
   controlsRow.appendChild(rightCluster);
 
-  const itemBtn = makeHoldButton('ITEM', '#f39c12');
+  // §v3 Track C1: ITEM is the one dimmable button — it reads dead until the
+  // game sends 'item-ready' for this slot. The keyframe colour in
+  // ensureControllerStyles is this same #f39c12.
+  const itemBtn = makeHoldButton('ITEM', '#f39c12', '', true);
   const brakeBtn = makeHoldButton('BRAKE', '#c0392b');
   const driftBtn = makeHoldButton('DRIFT', '#8e44ad');
   const throttleBtn = makeHoldButton('GO', '#27ae60');
@@ -605,13 +652,20 @@ export function initControllerUI(root: HTMLElement) {
   // state shows raceOverlay and hides characterScreen, so the two full-
   // screen surfaces are always mutually exclusive — never both, never
   // neither once joined.
+  // §v3 Track C1: 'item-ready'/'item-clear' are slot-targeted, so a phone only
+  // ever sees its OWN possession edges (the server relays game->controller
+  // events by `slot`). The state resets to dim on every state change that ends
+  // a race — the game clears held items on reset, and a stale lit ITEM button
+  // in the lobby would be a lie.
   function handleRaceEvent(name: EventName) {
     switch (name) {
       case 'lobby':
+        itemBtn.setLit(false);
         hideRaceOverlay();
         showCharacterScreen();
         break;
       case 'countdown':
+        itemBtn.setLit(false);
         hideCharacterScreen();
         showRaceOverlay('Get ready…', false);
         // One tick per second for the 3-2-1 countdown, approximated locally
@@ -629,6 +683,7 @@ export function initControllerUI(root: HTMLElement) {
         showRaceOverlay('Paused', false);
         break;
       case 'finished':
+        itemBtn.setLit(false);
         hideCharacterScreen();
         showRaceOverlay('🏁 Finished!', true);
         break;
@@ -637,6 +692,15 @@ export function initControllerUI(root: HTMLElement) {
       case 'boost':
       case 'collision':
         vibrate(30);
+        break;
+      case 'item-ready':
+        // A short buzz distinct from the 30ms boost/collision cue: you can
+        // feel that you picked something up without looking down.
+        itemBtn.setLit(true);
+        vibrate(20);
+        break;
+      case 'item-clear':
+        itemBtn.setLit(false);
         break;
     }
   }
@@ -675,6 +739,11 @@ export function initControllerUI(root: HTMLElement) {
           mySlot = slot;
           renderCharacterTiles();
           showPlay();
+          // §v3 Track C1: a (re)join carries no item state, so start dim and
+          // let the next 'item-ready' light it. (The button is already dim on
+          // a fresh page load; this covers rejoining after onGameLeft, where
+          // the same UI instance is reused.)
+          itemBtn.setLit(false);
           // Default to the lobby screen (characterScreen) until an event says
           // otherwise. If we're (re)joining mid-race, the game immediately
           // follows up with a slot-targeted event carrying its current

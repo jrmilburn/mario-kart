@@ -3,6 +3,7 @@ import { clamp, damp } from '../../shared/mathUtils';
 import { TUNING } from '../tuning';
 import type { KartState } from '../physics/Kart';
 import type { CharacterDef } from '../characters/registry';
+import { SPIN_OUT_SECONDS } from '../items/ItemSystem';
 import { buildKartChassis, disposeChassis, type KartChassis } from './KartBuilder';
 import { armPivotOf, buildCharacterModel } from './CharacterBuilder';
 
@@ -34,6 +35,12 @@ export interface KartVisual {
   // Kept so setKartCharacter can dispose the outgoing chassis when a player
   // re-picks: each character drives *their* kart, not just their colour.
   chassis: KartChassis;
+  // §v3 Track C2: seconds left on the mushroom squash-and-stretch pop. Set by
+  // triggerBoostPop when an item boost fires and decayed by updateKartVisual
+  // in the render loop (never on the physics tick) — it drives `group.scale`,
+  // which nothing else writes, so it composes with the existing lean (body
+  // roll), pitch (group rotation.x) and steer visuals rather than fighting them.
+  boostPopTimer: number;
 }
 
 // §Phase 4 item 2: the ground plane moved to render/Environment.ts
@@ -138,6 +145,7 @@ export function buildKart(def: CharacterDef): KartVisual {
     armPivot: null,
     tintMaterials: chassis.tintMaterials,
     chassis,
+    boostPopTimer: 0,
   };
   setDriver(visual, def, null); // seed the procedural driver immediately; caller swaps in the real model once loaded
   return visual;
@@ -250,6 +258,39 @@ const FRONT_WHEEL_YAW_SCALE = 0.4;
 const STEER_WHEEL_SCALE = -0.7;
 const STEER_ARM_SCALE = -0.22; // the arms only need a hint of the same roll
 
+// §v3 Track C2 spin-out visual. `stepKart` already yaws `kart.heading` at 10
+// rad/s while spun out; this adds exactly SPIN_VISUAL_TURNS more revolutions
+// *on top of it, visually only*, so getting shelled reads as a proper tumble
+// at split-screen size instead of a slow pirouette.
+//
+// It is a closed form of the elapsed spin fraction rather than an accumulator
+// on purpose. extra(u) = TURNS * 2PI * u * (2 - u) with u = elapsed/duration:
+//  - extra(0) = 0                      -> nothing pops when the spin starts,
+//  - d(extra)/dt is proportional to (1 - u), i.e. to the REMAINING spin time
+//    (the spec's wording) -> it eases out instead of stopping dead,
+//  - extra(1) = TURNS * 2PI, an exact whole number of turns -> the moment
+//    spinTimer hits 0 and this term drops away, the kart is already facing
+//    where the term left it, so there is no pop on the way out either.
+// Storing an accumulator instead would end on an arbitrary angle and have to
+// unwind visibly (i.e. spin the kart backwards) to get back to zero.
+const SPIN_VISUAL_TURNS = 1;
+
+// Mushroom pop (§v3 Track C2): a brief stretch along the kart's own +Z (its
+// nose) with a matching squash in X/Y, easing back to 1 over BOOST_POP_SECONDS.
+// Applied to `group.scale`, which is otherwise untouched.
+const BOOST_POP_SECONDS = 0.28;
+const BOOST_POP_STRETCH_Z = 0.26;
+const BOOST_POP_SQUASH_X = 0.16;
+const BOOST_POP_SQUASH_Y = 0.1;
+
+// §v3 Track C2: called by main.ts the moment a mushroom is actually fired (not
+// on every boost — a drift-release boost is already sold by the drift sparks,
+// and popping the kart on every tier-1 release would be constant noise).
+// Idempotent: re-firing mid-pop just restarts the timer.
+export function triggerBoostPop(visual: KartVisual) {
+  visual.boostPopTimer = BOOST_POP_SECONDS;
+}
+
 // Sets kart visuals from physics state each render frame (§3.2 closing paragraph):
 // body yaw = heading + drift lean, blended in/out over 0.15s; front wheels
 // yawed by steerActual x 0.4, independent of the body lean. `grade` (§Phase 5
@@ -259,7 +300,29 @@ const STEER_ARM_SCALE = -0.22; // the arms only need a hint of the same roll
 // drift lean so pitch changes don't pop across sample boundaries.
 export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number, grade = 0) {
   visual.group.position.copy(kart.pos);
-  visual.group.rotation.y = kart.heading;
+
+  // §v3 Track C2: the spin-out tumble is added here, to the *visual* yaw only —
+  // kart.heading is read, never written, so physics is untouched (the kart
+  // still travels exactly where stepKart's spin-out branch sends it).
+  let yaw = kart.heading;
+  if (kart.spinTimer > 0) {
+    const u = clamp(1 - kart.spinTimer / SPIN_OUT_SECONDS, 0, 1); // 0 at the hit -> 1 as control returns
+    yaw += SPIN_VISUAL_TURNS * Math.PI * 2 * u * (2 - u);
+  }
+  visual.group.rotation.y = yaw;
+
+  // §v3 Track C2: mushroom squash-and-stretch. The timer reaches exactly 0 on
+  // its last frame, which makes the scale exactly (1,1,1) again, so the guard
+  // below can skip the write entirely from the next frame on.
+  if (visual.boostPopTimer > 0) {
+    visual.boostPopTimer = Math.max(0, visual.boostPopTimer - dt);
+    const ease = (visual.boostPopTimer / BOOST_POP_SECONDS) ** 2;
+    visual.group.scale.set(
+      1 - BOOST_POP_SQUASH_X * ease,
+      1 - BOOST_POP_SQUASH_Y * ease,
+      1 + BOOST_POP_STRETCH_Z * ease,
+    );
+  }
 
   const targetLean = kart.drift.phase === 'active' ? kart.drift.dir * 0.25 : 0;
   visual.leanAngle = damp(visual.leanAngle, targetLean, LEAN_BLEND_RATE, dt);
@@ -284,6 +347,10 @@ export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number
 // §Phase 10 item visuals -----------------------------------------------------
 
 // Rotating vertex-colored cube; caller toggles .visible with box.active.
+// §v3 Track C2: the material is `transparent` now so the render loop can fade
+// the cube out on pickup (scale-up + fade) and scale it back in on respawn.
+// The ItemSystem state machine (box.active/respawnTimer) is unchanged — main.ts
+// derives the animation purely from watching `active` flip.
 export function buildItemBoxMesh(): THREE.Mesh {
   const geo = new THREE.BoxGeometry(1, 1, 1);
   const faceColors = [0xe74c3c, 0x3498db, 0xf1c40f, 0x2ecc71, 0xe67e22, 0x9b59b6];
@@ -294,7 +361,7 @@ export function buildItemBoxMesh(): THREE.Mesh {
     for (let v = 0; v < 4; v++) colors.push(c.r, c.g, c.b);
   }
   geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true }));
   mesh.position.y = 0.6;
   return mesh;
 }

@@ -17,7 +17,22 @@ const BANANA_RADIUS = 1.2;
 const BANANA_DROP_DISTANCE = 2;
 const BANANA_MAX_PER_KART = 3;
 
-const SPIN_OUT_SECONDS = 1;
+// §v3 Track C2: the banana no longer teleports to its resting spot — it is
+// tossed over the kart's tail on a short arc. `BANANA_TOSS_SECONDS` is both
+// the flight time AND the arming delay: while `tossTimer > 0` the banana is
+// still in the air, so updateBananas skips its collision check entirely (a
+// banana must never trip the kart that is in the middle of dropping it).
+// `BANANA_TOSS_PEAK` is how high above the straight spawn->rest line the
+// render loop bows the parabola. Exported because main.ts's render loop needs
+// both to reconstruct the arc for the visual.
+export const BANANA_TOSS_SECONDS = 0.35;
+export const BANANA_TOSS_PEAK = 0.8;
+const BANANA_TOSS_LAUNCH_HEIGHT = 0.7; // how far above the kart's contact patch the banana leaves the driver's hand
+
+// Exported so render/SceneBuilder can normalise `kart.spinTimer` into a 0..1
+// progress for the spin-out *visual* (§v3 Track C2) without duplicating the
+// duration in a second place that could drift out of sync with this one.
+export const SPIN_OUT_SECONDS = 1;
 const SPIN_OUT_SPEED_MULT = 0.3;
 
 const SHELL_SPEED = 40;
@@ -43,8 +58,17 @@ export interface HeldItemState {
 }
 
 export interface Banana {
+  // The resting spot, exactly as before — `pos` is authoritative for collision
+  // and is re-snapped to the local ground height every tick. During the toss
+  // the *visual* is interpolated away from it (main.ts), but the physics
+  // object itself never leaves the ground.
   pos: THREE.Vector3;
   ownerIndex: number;
+  // §v3 Track C2 toss arc. `spawnFrom` is where the banana left the kart and
+  // `tossTimer` counts the flight down from BANANA_TOSS_SECONDS to 0. A banana
+  // is "armed" (i.e. can spin somebody out) exactly when `tossTimer <= 0`.
+  spawnFrom: THREE.Vector3;
+  tossTimer: number;
 }
 
 export interface Shell {
@@ -130,7 +154,12 @@ export function useItem(args: {
       bananas.splice(bananas.indexOf(ownerBananas[0]), 1); // oldest makes way for the new one
     }
     const pos = kart.pos.clone().addScaledVector(kartForward(kart.heading), -BANANA_DROP_DISTANCE);
-    bananas.push({ pos, ownerIndex: kartIndex });
+    // §v3 Track C2: the throw starts at the driver's hands (just behind and
+    // above the kart's contact patch) and lands on `pos`; `tossTimer` keeps it
+    // unarmed for the whole flight.
+    const spawnFrom = kart.pos.clone().addScaledVector(kartForward(kart.heading), -0.5);
+    spawnFrom.y += BANANA_TOSS_LAUNCH_HEIGHT;
+    bananas.push({ pos, ownerIndex: kartIndex, spawnFrom, tossTimer: BANANA_TOSS_SECONDS });
   } else if (held.item === 'shell') {
     if (targetIndex === null) return false; // leading the race: nothing to target, keep holding
     shells.push({ pos: kart.pos.clone(), s: fireS, ownerIndex: kartIndex, targetIndex, age: 0 });
@@ -152,10 +181,36 @@ function spinOut(kart: KartState) {
 // track height under it every tick -- it doesn't move once dropped, but the
 // spot it landed on can still be sloped, and its initial y (copied from the
 // dropping kart's pos at throw time) is only an approximation of that.
-export function updateBananas(bananas: Banana[], karts: KartState[], groundHeightAt: (pos: THREE.Vector3) => number) {
+//
+// §v3 Track C2: `dt` is new — it counts the toss timer down. Until it reaches
+// zero the banana is mid-air and *unarmed*, so its collision loop is skipped
+// entirely. That is the only physics-tick behaviour change in Track C: it also
+// happens to fix the long-standing wart where a kart could clip its own
+// freshly-dropped banana while reversing into it.
+//
+// §v3 Track C2 review fix: `collide` splits the two halves apart. The toss
+// timer must keep counting down whenever the sim is running, but collisions
+// only matter while RACING — main.ts used to gate the whole call on `racing`,
+// so a banana thrown in the last third of a second before the race ended froze
+// mid-arc and the render loop left it hovering a metre above the track for the
+// whole results screen. Now the timer always runs and only the hit test is
+// gated, so that banana lands normally (it just can't trip anyone, which is
+// moot once the race is over).
+export function updateBananas(
+  bananas: Banana[],
+  karts: KartState[],
+  groundHeightAt: (pos: THREE.Vector3) => number,
+  dt: number,
+  collide: boolean,
+) {
   for (let i = bananas.length - 1; i >= 0; i--) {
     const banana = bananas[i];
     banana.pos.y = groundHeightAt(banana.pos);
+    if (banana.tossTimer > 0) {
+      banana.tossTimer = Math.max(0, banana.tossTimer - dt);
+      continue; // still in the air: not armed, cannot spin anybody out yet
+    }
+    if (!collide) continue;
     for (const kart of karts) {
       if (kart.spinTimer > 0) continue;
       if (kart.pos.distanceTo(banana.pos) < BANANA_RADIUS) {

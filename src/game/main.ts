@@ -20,8 +20,17 @@ import {
   buildItemBoxMesh,
   buildBananaMesh,
   buildShellMesh,
+  triggerBoostPop,
   type KartVisual,
 } from './render/SceneBuilder';
+import {
+  HeldItemMarkers,
+  ItemTrail,
+  SpinStars,
+  buildBoostFlare,
+  updateBoostFlare,
+  type BoostFlare,
+} from './render/ItemVisuals';
 import { buildEnvironment } from './render/Environment';
 import { CHARACTERS, CHARACTERS_BY_ID, type CharacterDef } from './characters/registry';
 import { loadCharacterModelInstance, preloadAll } from './characters/CharacterLoader';
@@ -42,6 +51,8 @@ import {
   updateBananas,
   updateShells,
   tickAiItemDecision,
+  BANANA_TOSS_PEAK,
+  BANANA_TOSS_SECONDS,
   type ItemBoxState,
   type HeldItemState,
   type Banana,
@@ -72,6 +83,15 @@ interface KartEntity {
   // independent cooldown/edge tracking instead of one pair of module-scope vars).
   collisionHapticCooldown: number;
   prevBoostTimer: number;
+  // §v3 Track C1: rising/falling edge tracking for "this player holds an
+  // item", the source of the slot-targeted 'item-ready'/'item-clear' cues that
+  // light/dim the phone's ITEM button. Tracked per entity (not per player)
+  // alongside prevBoostTimer for the same reason: both human seats need
+  // independent edge state.
+  prevHasItem: boolean;
+  // §v3 Track C2: the boost flare cones, parented to visual.group at build
+  // time so they inherit heading/pitch/squash but not the drift-lean roll.
+  boostFlare: BoostFlare;
   // §Phase 5 item 5: local track grade at this kart's position, refreshed by
   // the ground-follow step each physics tick and consumed by updateKartVisual
   // in the render loop -- reuses that tick's groundHeightAt query instead of
@@ -184,6 +204,12 @@ const entities: KartEntity[] = GRID.map((g, i) => {
   const kart = createKart(pos, heading, isAi);
   const visual = buildKart(def); // seeds body color + fallback driver synchronously
   scene.add(visual.group);
+  // §v3 Track C2: one flare rig per kart, hidden until boostTimer > 0. It hangs
+  // off the kart ROOT (not `body`) so the drift lean doesn't swing the flames
+  // off the exhausts, and it survives setKartCharacter — that swaps the
+  // chassis under `group`, never `group` itself.
+  const boostFlare = buildBoostFlare();
+  visual.group.add(boostFlare.group);
   const entity: KartEntity = {
     kart,
     visual,
@@ -197,6 +223,8 @@ const entities: KartEntity[] = GRID.map((g, i) => {
     colorHex: characterColorHex(def),
     collisionHapticCooldown: 0,
     prevBoostTimer: 0,
+    prevHasItem: false,
+    boostFlare,
     grade: 0,
     characterId: def.id,
     driverRequestId: 0,
@@ -301,21 +329,68 @@ const minimap = new Minimap(app, track.samples);
 // §Phase 10 items: 6 fixed boxes with their own rotating visual meshes, plus
 // dynamic banana/shell projectiles synced to THREE meshes each render frame.
 const itemBoxes: ItemBoxState[] = createItemBoxes(track.samples);
+// §v3 Track C2: `baseY` is captured at build time because the bob animation
+// rewrites mesh.position.y every frame and would otherwise drift.
+const ITEM_BOX_BASE_HEIGHT = 0.6;
 const itemBoxVisuals = itemBoxes.map((box) => {
   const mesh = buildItemBoxMesh();
-  mesh.position.copy(track.samples[box.sampleIdx].pos).add(new THREE.Vector3(0, 0.6, 0));
+  mesh.position.copy(track.samples[box.sampleIdx].pos).add(new THREE.Vector3(0, ITEM_BOX_BASE_HEIGHT, 0));
   scene.add(mesh);
   return mesh;
 });
+// §v3 Track C2 item-box animation. The state machine stays entirely in
+// ItemSystem (box.active / box.respawnTimer); this is a pure render-side
+// observer that watches `active` flip and plays a pop-out or scale-in. It has
+// to be separate state because `active` alone can't express "gone, but still
+// finishing its pop".
+const ITEM_BOX_POP_SECONDS = 0.26;
+const ITEM_BOX_SPAWN_SECONDS = 0.3;
+const ITEM_BOX_BOB = 0.13;
+const itemBoxAnim = itemBoxes.map((box) => ({
+  baseY: track.samples[box.sampleIdx].pos.y + ITEM_BOX_BASE_HEIGHT,
+  prevActive: true,
+  popTimer: 0,
+  spawnTimer: 0,
+}));
 const bananas: Banana[] = [];
 const shells: Shell[] = [];
 const bananaVisuals = new Map<Banana, THREE.Mesh>();
 const shellVisuals = new Map<Shell, THREE.Mesh>();
 
+// §v3 Track C: the in-world item feedback rigs. All three are pooled at
+// startup and never allocate afterwards (see render/ItemVisuals.ts).
+const heldItemMarkers = new HeldItemMarkers(scene, GRID.length);
+const spinStars = new SpinStars(scene, GRID.length);
+const shellTrail = new ItemTrail();
+scene.add(shellTrail.points);
+
+// Shared seconds accumulator for the render-loop-only animations (item box bob,
+// boost-flare flicker). Advanced once per frame by renderDt.
+let animClock = 0;
+// Shell trail emission is time-based, not per-frame, so the trail is the same
+// length at 60Hz and 144Hz.
+const SHELL_TRAIL_INTERVAL = 0.04;
+let shellTrailAccum = 0;
+
+// Standard easeOutBack: overshoots past 1 then settles, which is what makes a
+// scale-in read as a "pop" rather than a fade-in. Used by the item box respawn
+// and the shell spawn.
+function easeOutBack(u: number): number {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  const k = u - 1;
+  return 1 + c3 * k * k * k + c1 * k * k;
+}
+
 const lapTracker = new LapTracker(track.checkpoints, track.samples, track.totalLength);
 
 let finishCounter = 0;
 let playerFinishTimer: number | null = null;
+// §v3 Track C1 review fix: rising edge of "the race is actually running", used
+// to re-assert each phone's ITEM button state on every entry into RACING (see
+// the tick below). Starts false so the first countdown->RACING transition of
+// the session counts as an edge.
+let prevRacing = false;
 
 // Immediately ahead of `selfIndex` by race progress; null if already leading
 // (nothing to target a homing shell at).
@@ -344,6 +419,15 @@ function syncProjectileVisuals<T extends { pos: THREE.Vector3 }>(
   for (const [obj, mesh] of visuals) {
     if (!items.includes(obj)) {
       targetScene.remove(mesh);
+      // §v3 Track C review fix: buildBananaMesh/buildShellMesh allocate a fresh
+      // SphereGeometry + MeshLambertMaterial per projectile, so removing the
+      // mesh from the scene alone leaked its GPU buffers and shader program
+      // every time a banana was picked up/evicted, a shell hit or timed out, or
+      // resetRace() emptied both arrays. Nothing else references these — they
+      // are built here and owned by this map — so disposing on removal is safe.
+      mesh.geometry.dispose();
+      if (Array.isArray(mesh.material)) mesh.material.forEach((m) => m.dispose());
+      else mesh.material.dispose();
       visuals.delete(obj);
     }
   }
@@ -379,12 +463,32 @@ function resetRace() {
     e.prevItemInput = 0;
     e.collisionHapticCooldown = 0;
     e.prevBoostTimer = 0;
+    e.prevHasItem = false;
     e.grade = 0;
+    // §v3 Track C2: clear any in-flight use animation so a restart never
+    // starts with a stretched kart or a lit exhaust.
+    e.visual.boostPopTimer = 0;
+    e.visual.group.scale.set(1, 1, 1);
+    e.boostFlare.group.visible = false;
   }
   for (const box of itemBoxes) {
     box.active = true;
     box.respawnTimer = 0;
   }
+  // The pop/spawn animations are render-side state, so they have to be reset
+  // here too — otherwise a box picked up a frame before the restart would
+  // finish fading out over the freshly reset track.
+  for (const anim of itemBoxAnim) {
+    anim.prevActive = true;
+    anim.popTimer = 0;
+    anim.spawnTimer = 0;
+  }
+  // §v3 Track C2 review fix: the mushroom FOV kick lives on the camera, not on
+  // the entity, so it needs clearing here too — otherwise a restart pressed
+  // moments after a mushroom widens the lobby/countdown view and eases back
+  // over the next second (the kick decays exponentially and never snaps).
+  for (const p of players) p.followCamera.resetFov();
+  shellTrail.clear();
   bananas.length = 0;
   shells.length = 0;
   finishCounter = 0;
@@ -505,6 +609,15 @@ const socket = new GameSocket({
     // the right screen instead of being stuck on the character grid.
     if (event === 'controller-joined' && raceDirector.state !== 'LOBBY') {
       socket.sendEvent(raceStateToEvent(raceDirector.state), s);
+      // §v3 Track C1: the state event above leaves the ITEM button dim (every
+      // screen transition resets it), so re-assert this slot's actual
+      // possession — a phone that reconnects mid-race while holding a shell
+      // must not sit there with a dead-looking ITEM button. Only meaningful
+      // for a slot that is actually driving: if this slot isn't active, entity
+      // `entityIndex` is being run by AI and its item is none of this phone's
+      // business.
+      const holdsItem = players[s].active && entityFor(players[s]).itemState.item !== null;
+      socket.sendEvent(holdsItem ? 'item-ready' : 'item-clear', s);
     }
   },
   onInput: (snapshot) => {
@@ -542,6 +655,28 @@ startLoop(
     if (raceDirector.state === 'PAUSED') return; // physics frozen entirely
 
     const racing = raceDirector.state === 'RACING';
+
+    // §v3 Track C1 review fix: every screen transition on the controller
+    // (ui.ts's handleRaceEvent) dims the ITEM button, but a PAUSED->COUNTDOWN
+    // resume does NOT reset the race — resetRace() only runs on the LOBBY
+    // transition — so a player can come back from a pause still holding the
+    // shell they had. The possession edge below can't recover that on its own
+    // (hasItem never changes, so there is no edge to send), which left the
+    // button permanently dim mid-race. Re-assert the truth for every active
+    // human whenever the race (re)enters RACING instead. This runs after
+    // raceDirector.tick() has already emitted 'go', so the cue can't be
+    // overwritten by the transition it follows. `prevHasItem` is re-seeded at
+    // the same time so the next real edge is measured from a known-sent state.
+    if (racing && !prevRacing) {
+      for (const p of players) {
+        if (!p.active) continue;
+        const e = entityFor(p);
+        e.prevHasItem = e.itemState.item !== null;
+        socket.sendEvent(e.prevHasItem ? 'item-ready' : 'item-clear', p.slot);
+      }
+    }
+    prevRacing = racing;
+
     if (racing) updateItemBoxes(itemBoxes, dt);
 
     const hitWallThisTick: boolean[] = new Array(entities.length).fill(false);
@@ -597,7 +732,11 @@ startLoop(
         // but must use press-edge firing whenever P2 is actively driving it.
         const wantsFire = drivingPlayer ? itemPressed : tickAiItemDecision(e.itemState, dt);
         if (wantsFire) {
-          useItem({
+          // Captured before useItem clears it — the mushroom's use animation
+          // (§v3 Track C2) needs to know *what* was fired, and useItem only
+          // reports whether anything was.
+          const firedType = e.itemState.item;
+          const fired = useItem({
             kartIndex: i,
             kart: e.kart,
             held: e.itemState,
@@ -606,6 +745,14 @@ startLoop(
             targetIndex: findNextAhead(i),
             fireS: trackQuery.nearestSample(e.kart.pos).s,
           });
+          if (fired && firedType === 'mushroom') {
+            // Squash-and-stretch on every mushroom (so opponents' boosts read
+            // too), but the FOV kick only on the *firing* human's own camera —
+            // lurching a split-screen opponent's view because you used an item
+            // would be actively unpleasant.
+            triggerBoostPop(e.visual);
+            if (drivingPlayer) drivingPlayer.followCamera.kickFov();
+          }
         }
       }
     }
@@ -629,8 +776,13 @@ startLoop(
       e.grade = groundSample.grade;
     }
 
+    // §v3 Track C2: `dt` counts each banana's toss/arming timer down. Called on
+    // every unpaused tick, not just while RACING (§review fix): the arc has to
+    // finish even if the race ends mid-throw, or the render loop keeps drawing
+    // the banana suspended at its parabola's peak for the whole results screen.
+    // Only the collision half is gated on `racing`.
+    updateBananas(bananas, entities.map((e) => e.kart), groundHeightAt, dt, racing);
     if (racing) {
-      updateBananas(bananas, entities.map((e) => e.kart), groundHeightAt);
       updateShells(shells, entities.map((e) => e.kart), track.samples, track.totalLength, dt);
     }
 
@@ -652,6 +804,17 @@ startLoop(
         if (p.slot === 0) engineAudio.burst(0.2, 0.2);
       }
       e.prevBoostTimer = e.kart.boostTimer;
+
+      // §v3 Track C1: slot-targeted item possession edges. Sent only on a
+      // change (never per tick) and only to this player's own phone, which
+      // lights/dims its ITEM button. The edge is tracked even when not racing
+      // so a state transition can't leave a stale `prevHasItem` behind that
+      // would swallow the first real edge of the next race.
+      const hasItem = e.itemState.item !== null;
+      if (hasItem !== e.prevHasItem) {
+        if (racing) socket.sendEvent(hasItem ? 'item-ready' : 'item-clear', p.slot);
+        e.prevHasItem = hasItem;
+      }
     }
 
     if (racing) {
@@ -685,8 +848,32 @@ startLoop(
     const now = performance.now();
     const renderDt = Math.min((now - lastRenderTime) / 1000, 0.1);
     lastRenderTime = now;
+    animClock += renderDt;
 
     for (const e of entities) updateKartVisual(e.visual, e.kart, renderDt, e.grade);
+
+    // §v3 Track C: per-kart item feedback. All of it is driven off state the
+    // physics tick already owns (itemState.item, kart.spinTimer,
+    // kart.boostTimer) and advanced with renderDt, so nothing here can feed
+    // back into the simulation. Applies to every kart, not just the humans —
+    // seeing the AI two lengths behind you holding a shell is the point.
+    heldItemMarkers.tick(renderDt);
+    spinStars.tick(renderDt);
+    for (let i = 0; i < entities.length; i++) {
+      const e = entities[i];
+      // A spun-out kart shows stars instead of its item marker: stacking both
+      // over one kart is noise, and the stars are the more urgent message.
+      heldItemMarkers.set(i, e.kart.spinTimer > 0 ? null : e.itemState.item, e.kart.pos);
+      spinStars.set(i, e.kart.spinTimer, e.kart.pos);
+      updateBoostFlare(
+        e.boostFlare,
+        e.kart.boostTimer,
+        animClock,
+        e.visual.chassis.rearZ,
+        e.visual.chassis.exhaustY,
+        e.visual.chassis.exhausts,
+      );
+    }
 
     // Split-screen layout/sizing only needs to change when the roster lock
     // (isSplit) actually flips — not recomputed every frame (§Phase 2c).
@@ -743,16 +930,92 @@ startLoop(
       entities.map((e) => ({ pos: e.kart.pos, color: e.colorHex, isPlayer: activeHumanEntities.has(e) })),
     );
 
-    // Item box visuals: rotate continuously, hide while respawning.
+    // Item box visuals (§v3 Track C2): bob + spin while active, a scale-up
+    // fade-out pop on pickup, a scale-in on respawn. The ItemSystem state
+    // machine is untouched — this only *observes* box.active flipping.
     itemBoxes.forEach((box, i) => {
       const mesh = itemBoxVisuals[i];
-      mesh.visible = box.active;
+      const anim = itemBoxAnim[i];
+      const material = mesh.material as THREE.MeshLambertMaterial;
+      if (box.active !== anim.prevActive) {
+        anim.prevActive = box.active;
+        if (box.active) {
+          anim.spawnTimer = ITEM_BOX_SPAWN_SECONDS;
+          anim.popTimer = 0;
+        } else {
+          anim.popTimer = ITEM_BOX_POP_SECONDS;
+          anim.spawnTimer = 0;
+        }
+      }
       mesh.rotation.y += renderDt * 1.5;
+
+      if (anim.popTimer > 0) {
+        // Still playing the pickup pop: the box is logically gone but stays
+        // on screen for another quarter-second, swelling and fading.
+        anim.popTimer = Math.max(0, anim.popTimer - renderDt);
+        const u = 1 - anim.popTimer / ITEM_BOX_POP_SECONDS; // 0 -> 1
+        mesh.visible = true;
+        mesh.scale.setScalar(1 + u * 0.9);
+        material.opacity = 1 - u;
+        mesh.position.y = anim.baseY;
+      } else if (box.active) {
+        mesh.visible = true;
+        material.opacity = 1;
+        if (anim.spawnTimer > 0) {
+          anim.spawnTimer = Math.max(0, anim.spawnTimer - renderDt);
+          mesh.scale.setScalar(easeOutBack(1 - anim.spawnTimer / ITEM_BOX_SPAWN_SECONDS));
+        } else {
+          mesh.scale.setScalar(1);
+        }
+        mesh.position.y = anim.baseY + Math.sin(animClock * 2 + i) * ITEM_BOX_BOB;
+      } else {
+        mesh.visible = false;
+      }
     });
 
     // Sync banana/shell meshes to their live-object arrays (create/remove as needed).
     syncProjectileVisuals(bananas, bananaVisuals, buildBananaMesh, scene);
     syncProjectileVisuals(shells, shellVisuals, buildShellMesh, scene);
+
+    // §v3 Track C2 banana toss arc. syncProjectileVisuals has just snapped
+    // every mesh onto its object's resting `pos`; while the banana is still
+    // in the air (tossTimer > 0, i.e. unarmed) the visual is lifted off that
+    // resting spot and bowed along a parabola from `spawnFrom` instead. The
+    // physics object itself never leaves the ground — this is display only.
+    for (const banana of bananas) {
+      const mesh = bananaVisuals.get(banana);
+      if (!mesh) continue;
+      if (banana.tossTimer > 0) {
+        const t = 1 - banana.tossTimer / BANANA_TOSS_SECONDS; // 0 at the throw -> 1 on landing
+        mesh.position.lerpVectors(banana.spawnFrom, banana.pos, t);
+        mesh.position.y += Math.sin(t * Math.PI) * BANANA_TOSS_PEAK + 0.2;
+        mesh.rotation.y += renderDt * 9;
+        // Tilt peaks mid-flight and is back to level exactly on landing, so
+        // the banana settles flat with no snap and no post-landing easing state.
+        mesh.rotation.x = Math.sin(t * Math.PI) * 0.6;
+      } else {
+        mesh.position.y += 0.2;
+        mesh.rotation.x = 0;
+      }
+    }
+
+    // §v3 Track C2 shell: scale-in pop, fast Y spin, a slight hover bob, and a
+    // pooled fading trail. `shell.age` is already maintained by updateShells,
+    // so no new per-shell state is needed for any of it.
+    shellTrailAccum += renderDt;
+    const emitShellTrail = shellTrailAccum >= SHELL_TRAIL_INTERVAL;
+    if (emitShellTrail) shellTrailAccum = 0;
+    for (const shell of shells) {
+      const mesh = shellVisuals.get(shell);
+      if (!mesh) continue;
+      mesh.scale.setScalar(easeOutBack(Math.min(1, shell.age / 0.18)));
+      mesh.rotation.y = shell.age * 15;
+      mesh.position.y = shell.pos.y + 0.42 + Math.sin(shell.age * 9) * 0.07;
+      if (emitShellTrail) {
+        shellTrail.emit(mesh.position.x, mesh.position.y, mesh.position.z, 0.35, 1, 0.5);
+      }
+    }
+    shellTrail.update(renderDt);
 
     const ranked = [...entities].sort(comparePosition);
     const maxTierTime = TUNING.driftTierTimes[TUNING.driftTierTimes.length - 1];
@@ -766,8 +1029,12 @@ startLoop(
       const ph = playerHuds[p.slot];
       const driftActive = e.kart.drift.phase === 'active';
       ph.setDriftCharge(driftActive, driftTier(e.kart.drift.charge), e.kart.drift.charge / maxTierTime);
-      const heldDisplay = e.itemState.rouletteTimer > 0 ? e.itemState.rouletteDisplay : e.itemState.item;
-      ph.setHeldItem(heldDisplay);
+      // §v3 Track C1: the HUD slot now has three states rather than
+      // "icon or nothing". main.ts keeps ownership of the roulette-vs-held
+      // choice (as before) and passes the resolved display item plus whether
+      // the roulette is still spinning; PlayerHud does the rest.
+      const rolling = e.itemState.rouletteTimer > 0;
+      ph.setItemState({ item: rolling ? e.itemState.rouletteDisplay : e.itemState.item, rolling });
     }
 
     switch (raceDirector.state) {
