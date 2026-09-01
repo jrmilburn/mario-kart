@@ -4,7 +4,7 @@ import { InputSource, type ControlState } from './input/InputSource';
 import { Hud } from './ui/Hud';
 import { Diagnostics } from './ui/Diagnostics';
 import { startLoop } from './core/loop';
-import { createKart, driftTier, stepKart, type KartState } from './physics/Kart';
+import { createKart, driftTier, kartForward, stepKart, type KartState } from './physics/Kart';
 import { resolveWallCollision, resolveKartKartCollisions } from './physics/collision';
 import {
   buildGround,
@@ -39,6 +39,10 @@ import {
   type Banana,
   type Shell,
 } from './items/ItemSystem';
+import { DriftSparks } from './render/DriftSparks';
+import { EngineAudio } from './audio/EngineAudio';
+import { Minimap } from './ui/Minimap';
+
 const NEUTRAL_CONTROL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0, item: 0 };
 const PLAYER_FINISH_DELAY_SECONDS = 1.5;
 
@@ -52,6 +56,7 @@ interface KartEntity {
   spawnLane: number;
   itemState: HeldItemState;
   prevItemInput: 0 | 1;
+  colorHex: string;
 }
 
 const app = document.getElementById('app')!;
@@ -106,9 +111,18 @@ const entities: KartEntity[] = GRID.map((g) => {
     spawnLane: g.lane,
     itemState: createHeldItemState(),
     prevItemInput: 0 as const,
+    colorHex: `#${g.color.toString(16).padStart(6, '0')}`,
   };
 });
 const player = entities[0];
+
+// §Phase 11 juice: pooled drift-spark particles, WebAudio engine hum, minimap.
+const driftSparks = new DriftSparks();
+scene.add(driftSparks.points);
+const engineAudio = new EngineAudio();
+window.addEventListener('pointerdown', () => engineAudio.ensureStarted(), { once: true });
+window.addEventListener('keydown', () => engineAudio.ensureStarted(), { once: true });
+const minimap = new Minimap(app, track.samples);
 
 // §Phase 10 items: 6 fixed boxes with their own rotating visual meshes, plus
 // dynamic banana/shell projectiles synced to THREE meshes each render frame.
@@ -129,6 +143,9 @@ const lapTracker = new LapTracker(track.checkpoints, track.samples, track.totalL
 
 let finishCounter = 0;
 let playerFinishTimer: number | null = null;
+let prevPlayerBoostTimer = 0;
+let collisionHapticCooldown = 0;
+const COLLISION_HAPTIC_COOLDOWN_SECONDS = 0.3; // avoid vibration spam while wall-scraping
 
 // Immediately ahead of `selfIndex` by race progress; null if already leading
 // (nothing to target a homing shell at).
@@ -283,6 +300,8 @@ startLoop(
     const racing = raceDirector.state === 'RACING';
     if (racing) updateItemBoxes(itemBoxes, dt);
 
+    let playerHitWallThisTick = false;
+
     for (let i = 0; i < entities.length; i++) {
       const e = entities[i];
       const preSample = trackQuery.nearestSample(e.kart.pos);
@@ -314,7 +333,8 @@ startLoop(
       }
 
       stepKart(e.kart, control, dt, offRoad, topSpeedScale);
-      resolveWallCollision(e.kart, trackQuery);
+      const hitWall = resolveWallCollision(e.kart, trackQuery);
+      if (i === 0 && hitWall) playerHitWallThisTick = true;
 
       if (racing) {
         tryPickupItemBox(itemBoxes, track.samples, e.kart.pos, e.itemState);
@@ -337,7 +357,7 @@ startLoop(
       }
     }
 
-    resolveKartKartCollisions(
+    const kartKartHits = resolveKartKartCollisions(
       entities.map((e) => e.kart),
       dt,
     );
@@ -346,6 +366,20 @@ startLoop(
       updateBananas(bananas, entities.map((e) => e.kart));
       updateShells(shells, entities.map((e) => e.kart), track.samples, track.totalLength, dt);
     }
+
+    // §Phase 11d haptic/audio cues for the player's own hits and boosts.
+    collisionHapticCooldown = Math.max(0, collisionHapticCooldown - dt);
+    const playerCollided = playerHitWallThisTick || kartKartHits.has(0);
+    if (racing && playerCollided && collisionHapticCooldown <= 0) {
+      socket.sendEvent('collision');
+      engineAudio.burst(0.12, 0.1);
+      collisionHapticCooldown = COLLISION_HAPTIC_COOLDOWN_SECONDS;
+    }
+    if (racing && player.kart.boostTimer > 0 && prevPlayerBoostTimer <= 0) {
+      socket.sendEvent('boost');
+      engineAudio.burst(0.2, 0.2);
+    }
+    prevPlayerBoostTimer = player.kart.boostTimer;
 
     if (racing) {
       for (const e of entities) {
@@ -382,6 +416,19 @@ startLoop(
     const driftActive = player.kart.drift.phase === 'active';
     const maxTierTime = TUNING.driftTierTimes[TUNING.driftTierTimes.length - 1];
     hud.setDriftCharge(driftActive, driftTier(player.kart.drift.charge), player.kart.drift.charge / maxTierTime);
+
+    // §Phase 11a/b: drift sparks tinted by tier, engine pitch mapped to speed.
+    for (const e of entities) {
+      if (e.kart.drift.phase !== 'active') continue;
+      const rearOffset = kartForward(e.kart.heading).multiplyScalar(-1);
+      const sparkPos = e.kart.pos.clone().addScaledVector(rearOffset, 1.0);
+      sparkPos.y = 0.3;
+      driftSparks.emit(sparkPos, driftTier(e.kart.drift.charge));
+    }
+    driftSparks.update(renderDt);
+    engineAudio.setSpeed(Math.abs(player.kart.speed) / TUNING.topSpeed);
+
+    minimap.update(entities.map((e) => ({ pos: e.kart.pos, color: e.colorHex, isPlayer: e === player })));
 
     // Item box visuals: rotate continuously, hide while respawning.
     itemBoxes.forEach((box, i) => {

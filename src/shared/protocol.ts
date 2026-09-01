@@ -48,9 +48,19 @@ export interface PeerMessage {
   event: 'controller-joined' | 'controller-left' | 'game-left';
 }
 
-// game -> controller: state announcements. controller -> game: 'start' (START
-// button/Enter) and 'restart' (restart button/R) are commands relayed verbatim.
-export type EventName = 'lobby' | 'countdown' | 'go' | 'paused' | 'finished' | 'restart' | 'start';
+// game -> controller: state announcements, plus 'boost'/'collision' haptic
+// cues (§Phase 11d). controller -> game: 'start' (START button/Enter) and
+// 'restart' (restart button/R) are commands relayed verbatim.
+export type EventName =
+  | 'lobby'
+  | 'countdown'
+  | 'go'
+  | 'paused'
+  | 'finished'
+  | 'restart'
+  | 'start'
+  | 'boost'
+  | 'collision';
 
 export interface EventMessage {
   type: 'event';
@@ -160,7 +170,17 @@ export function isPeerMessage(m: unknown): m is PeerMessage {
   return o.event === 'controller-joined' || o.event === 'controller-left' || o.event === 'game-left';
 }
 
-const EVENT_NAMES: EventName[] = ['lobby', 'countdown', 'go', 'paused', 'finished', 'restart', 'start'];
+const EVENT_NAMES: EventName[] = [
+  'lobby',
+  'countdown',
+  'go',
+  'paused',
+  'finished',
+  'restart',
+  'start',
+  'boost',
+  'collision',
+];
 
 export function isEventMessage(m: unknown): m is EventMessage {
   const o = m as Partial<EventMessage>;

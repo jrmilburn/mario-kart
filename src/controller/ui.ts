@@ -361,6 +361,11 @@ export function initControllerUI(root: HTMLElement) {
     raceOverlay.style.display = 'none';
   }
 
+  // Android-only (§Phase 11d); iOS Safari has no Vibration API, so this is a no-op there.
+  function vibrate(ms: number) {
+    navigator.vibrate?.(ms);
+  }
+
   function handleRaceEvent(name: EventName) {
     switch (name) {
       case 'lobby':
@@ -368,6 +373,11 @@ export function initControllerUI(root: HTMLElement) {
         break;
       case 'countdown':
         showRaceOverlay('Get ready…', false, false);
+        // One tick per second for the 3-2-1 countdown, approximated locally
+        // (the game doesn't send a message per tick, only the countdown start).
+        vibrate(30);
+        window.setTimeout(() => vibrate(30), 1000);
+        window.setTimeout(() => vibrate(30), 2000);
         break;
       case 'go':
         hideRaceOverlay();
@@ -380,6 +390,10 @@ export function initControllerUI(root: HTMLElement) {
         break;
       case 'restart':
         break; // a 'lobby' event immediately follows and resets the overlay
+      case 'boost':
+      case 'collision':
+        vibrate(30);
+        break;
     }
   }
 

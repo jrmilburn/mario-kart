@@ -11,14 +11,15 @@ const KART_KART_EXTRA_SEPARATION_MPS = 1.5; // "1.5 m/s position push" for side 
 
 // §3.3 kart-vs-wall. Positional lateral-offset clamp (not a raycast) so it
 // cannot tunnel even at top speed. Call after Kart.stepKart has integrated
-// position for this tick.
-export function resolveWallCollision(kart: KartState, trackQuery: TrackQuery) {
+// position for this tick. Returns true for a non-glancing hit (used to fire
+// the §Phase 11d collision haptic) — a glancing scrape doesn't count.
+export function resolveWallCollision(kart: KartState, trackQuery: TrackQuery): boolean {
   const T = TUNING;
   const q = trackQuery.nearestSample(kart.pos);
   const limit = GRASS_HALF - T.kartRadius;
   const absLateral = Math.abs(q.lateral);
 
-  if (absLateral <= limit) return;
+  if (absLateral <= limit) return false;
 
   const sign = Math.sign(q.lateral);
   kart.pos.addScaledVector(q.right, -(absLateral - limit) * sign);
@@ -36,7 +37,7 @@ export function resolveWallCollision(kart: KartState, trackQuery: TrackQuery) {
 
   if (impactAngle < GLANCING_ANGLE_RAD) {
     // Glancing scrape: position clamp only, no speed/heading penalty.
-    return;
+    return false;
   }
 
   kart.speed = tangentSpeed * (1 - T.wallSpeedPenalty * Math.abs(Math.sin(impactAngle)));
@@ -47,13 +48,17 @@ export function resolveWallCollision(kart: KartState, trackQuery: TrackQuery) {
   if (v.dot(tangentDir) < 0) tangentDir.negate();
   const tangentHeading = Math.atan2(tangentDir.x, tangentDir.z);
   kart.heading += angleWrap(tangentHeading - kart.heading) * HEADING_ALIGN_FRACTION;
+  return true;
 }
 
 // §3.3 kart-vs-kart. Positions only; heading is never touched (arcade karts
 // bump, they don't ragdoll). No drift cancel here — only walls cancel drift.
-export function resolveKartKartCollisions(karts: KartState[], dt: number) {
+// Returns the indices of karts that took a real impulse this tick (used to
+// fire the §Phase 11d collision haptic) — separating contact doesn't count.
+export function resolveKartKartCollisions(karts: KartState[], dt: number): Set<number> {
   const T = TUNING;
   const minDist = 2 * T.kartRadius;
+  const hitIndices = new Set<number>();
 
   for (let i = 0; i < karts.length; i++) {
     for (let j = i + 1; j < karts.length; j++) {
@@ -88,6 +93,10 @@ export function resolveKartKartCollisions(karts: KartState[], dt: number) {
       const newVb = vb.clone().addScaledVector(normal, avgNormal - vbNormal);
       a.speed = newVa.dot(kartForward(a.heading));
       b.speed = newVb.dot(kartForward(b.heading));
+      hitIndices.add(i);
+      hitIndices.add(j);
     }
   }
+
+  return hitIndices;
 }
