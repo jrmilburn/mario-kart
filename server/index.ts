@@ -8,10 +8,12 @@ import path from 'node:path';
 import { WebSocket, WebSocketServer, type WebSocketServer as WSS } from 'ws';
 import {
   parseMessage,
+  MAX_CONTROLLERS,
   ROOM_CODE_CHARS,
   ROOM_CODE_LENGTH,
   ROOM_GRACE_MS,
   type AnyMessage,
+  type PlayerSlot,
 } from '../src/shared/protocol';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -51,14 +53,13 @@ if (hasCerts) {
 interface Room {
   code: string;
   gameSocket: WebSocket | null;
-  controllerSocket: WebSocket | null;
+  controllerSockets: (WebSocket | null)[]; // length MAX_CONTROLLERS, indexed by PlayerSlot
   graceTimer: NodeJS.Timeout | null;
 }
 
-interface SocketState {
-  role: 'game' | 'controller';
-  roomCode: string;
-}
+type SocketState =
+  | { role: 'game'; roomCode: string }
+  | { role: 'controller'; roomCode: string; slot: PlayerSlot };
 
 const rooms = new Map<string, Room>();
 const socketState = new WeakMap<WebSocket, SocketState>();
@@ -145,13 +146,21 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
           room.gameSocket = socket;
         } else {
           const code = generateRoomCode();
-          room = { code, gameSocket: socket, controllerSocket: null, graceTimer: null };
+          room = {
+            code,
+            gameSocket: socket,
+            controllerSockets: new Array(MAX_CONTROLLERS).fill(null),
+            graceTimer: null,
+          };
           rooms.set(code, room);
         }
         socketState.set(socket, { role: 'game', roomCode: room.code });
         send(socket, { type: 'room', code: room.code, joinUrl: buildJoinUrl(req, room.code) });
-        if (room.controllerSocket && room.controllerSocket.readyState === WebSocket.OPEN) {
-          send(socket, { type: 'peer', event: 'controller-joined' });
+        for (let s = 0; s < MAX_CONTROLLERS; s++) {
+          const cs = room.controllerSockets[s];
+          if (cs && cs.readyState === WebSocket.OPEN) {
+            send(socket, { type: 'peer', event: 'controller-joined', slot: s as PlayerSlot });
+          }
         }
         return;
       }
@@ -162,14 +171,30 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
           send(socket, { type: 'error', reason: 'bad-room' });
           return;
         }
-        if (room.controllerSocket && room.controllerSocket.readyState === WebSocket.OPEN) {
+        // Grant the requested slot if it's free/dead; otherwise the lowest
+        // free slot. `room-full` only when both slots are held by OPEN sockets.
+        let slot: PlayerSlot | null = null;
+        if (msg.wantSlot !== undefined) {
+          const held = room.controllerSockets[msg.wantSlot];
+          if (!held || held.readyState !== WebSocket.OPEN) slot = msg.wantSlot;
+        }
+        if (slot === null) {
+          for (let s = 0; s < MAX_CONTROLLERS; s++) {
+            const held = room.controllerSockets[s];
+            if (!held || held.readyState !== WebSocket.OPEN) {
+              slot = s as PlayerSlot;
+              break;
+            }
+          }
+        }
+        if (slot === null) {
           send(socket, { type: 'error', reason: 'room-full' });
           return;
         }
-        room.controllerSocket = socket;
-        socketState.set(socket, { role: 'controller', roomCode: room.code });
-        send(socket, { type: 'joined' });
-        if (room.gameSocket) send(room.gameSocket, { type: 'peer', event: 'controller-joined' });
+        room.controllerSockets[slot] = socket;
+        socketState.set(socket, { role: 'controller', roomCode: room.code, slot });
+        send(socket, { type: 'joined', slot });
+        if (room.gameSocket) send(room.gameSocket, { type: 'peer', event: 'controller-joined', slot });
         return;
       }
       return;
@@ -184,17 +209,24 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
     }
 
     if (state.role === 'controller' && msg.type === 'input') {
-      if (room.gameSocket) send(room.gameSocket, msg);
+      if (room.gameSocket) send(room.gameSocket, { ...msg, slot: state.slot });
       return;
     }
 
     if (state.role === 'game' && msg.type === 'event') {
-      if (room.controllerSocket) send(room.controllerSocket, msg);
+      if (msg.slot !== undefined) {
+        const cs = room.controllerSockets[msg.slot];
+        if (cs) send(cs, msg);
+      } else {
+        for (const cs of room.controllerSockets) {
+          if (cs) send(cs, msg);
+        }
+      }
       return;
     }
 
     if (state.role === 'controller' && msg.type === 'event') {
-      if (room.gameSocket) send(room.gameSocket, msg);
+      if (room.gameSocket) send(room.gameSocket, { ...msg, slot: state.slot });
       return;
     }
   });
@@ -208,15 +240,17 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
     if (state.role === 'game' && room.gameSocket === socket) {
       room.gameSocket = null;
       room.graceTimer = setTimeout(() => {
-        if (room.controllerSocket) {
-          send(room.controllerSocket, { type: 'peer', event: 'game-left' });
-          room.controllerSocket.close();
+        for (const cs of room.controllerSockets) {
+          if (cs) {
+            send(cs, { type: 'peer', event: 'game-left' });
+            cs.close();
+          }
         }
         destroyRoom(room);
       }, ROOM_GRACE_MS);
-    } else if (state.role === 'controller' && room.controllerSocket === socket) {
-      room.controllerSocket = null;
-      if (room.gameSocket) send(room.gameSocket, { type: 'peer', event: 'controller-left' });
+    } else if (state.role === 'controller' && room.controllerSockets[state.slot] === socket) {
+      room.controllerSockets[state.slot] = null;
+      if (room.gameSocket) send(room.gameSocket, { type: 'peer', event: 'controller-left', slot: state.slot });
     }
   });
 }

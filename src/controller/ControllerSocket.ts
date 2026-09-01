@@ -3,10 +3,12 @@ import {
   PING_INTERVAL_MS,
   type ControllerToServer,
   type EventName,
+  type PlayerSlot,
   type SteerMode,
 } from '../shared/protocol';
 
 const CODE_STORAGE_KEY = 'kart.controller.roomCode';
+const SLOT_STORAGE_KEY = 'kart.controller.slot';
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000];
 const MISSED_PONG_LIMIT = 2;
 
@@ -24,7 +26,7 @@ export interface ControllerInput {
 
 export interface ControllerSocketCallbacks {
   onStatus?: (status: ConnectionStatus) => void;
-  onJoined?: () => void;
+  onJoined?: (slot: PlayerSlot) => void;
   onJoinError?: (reason: JoinErrorReason) => void;
   onGameLeft?: () => void;
   onEvent?: (name: EventName) => void;
@@ -42,6 +44,7 @@ export class ControllerSocket {
   private missedPongs = 0;
   private seq = 0;
   private getInput: () => ControllerInput;
+  slot: PlayerSlot | null = null;
 
   constructor(
     private code: string,
@@ -60,7 +63,9 @@ export class ControllerSocket {
 
     ws.addEventListener('open', () => {
       this.missedPongs = 0;
-      this.sendRaw({ type: 'hello', role: 'controller', code: this.code });
+      const storedSlot = sessionStorage.getItem(SLOT_STORAGE_KEY);
+      const wantSlot = storedSlot !== null ? (Number(storedSlot) as PlayerSlot) : undefined;
+      this.sendRaw({ type: 'hello', role: 'controller', code: this.code, wantSlot });
     });
 
     ws.addEventListener('message', (ev) => {
@@ -69,9 +74,11 @@ export class ControllerSocket {
       switch (msg.type) {
         case 'joined':
           this.reconnectAttempt = 0;
+          this.slot = msg.slot;
           sessionStorage.setItem(CODE_STORAGE_KEY, this.code);
+          sessionStorage.setItem(SLOT_STORAGE_KEY, String(msg.slot));
           this.callbacks.onStatus?.('connected');
-          this.callbacks.onJoined?.();
+          this.callbacks.onJoined?.(msg.slot);
           this.startSending();
           this.startHeartbeat();
           break;

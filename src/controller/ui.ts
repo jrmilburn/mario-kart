@@ -59,6 +59,12 @@ export function initControllerUI(root: HTMLElement) {
   statusGroup.style.cssText = 'display:flex; align-items:center; gap:8px;';
   header.appendChild(statusGroup);
 
+  const slotBadge = document.createElement('div');
+  slotBadge.style.cssText =
+    'display:none; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:800; ' +
+    'background:#2c3e50; color:#fff; letter-spacing:1px;';
+  statusGroup.appendChild(slotBadge);
+
   const modeToggle = document.createElement('button');
   modeToggle.textContent = '🎮 TOUCH';
   modeToggle.style.cssText =
@@ -514,7 +520,9 @@ export function initControllerUI(root: HTMLElement) {
           pill.textContent = text;
           pill.style.background = color;
         },
-        onJoined: () => {
+        onJoined: (slot) => {
+          slotBadge.textContent = slot === 0 ? 'P1' : 'P2';
+          slotBadge.style.display = 'block';
           showPlay();
           showRaceOverlay('', true, false); // default to the lobby/START state until an event says otherwise
           wakeLock.start();

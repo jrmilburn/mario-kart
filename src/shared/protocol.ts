@@ -3,6 +3,12 @@
 
 export type SteerMode = 'touch' | 'tilt';
 
+// Phase 2a (v2): up to two controllers per room, one per player. `slot` is
+// always stamped/assigned by the server — a controller never gets to claim
+// an arbitrary slot for itself, only *request* one via `wantSlot`.
+export type PlayerSlot = 0 | 1;
+export const MAX_CONTROLLERS = 2;
+
 export interface InputSnapshot {
   type: 'input';
   seq: number; // monotonically increasing per controller session
@@ -12,6 +18,7 @@ export interface InputSnapshot {
   drift: 0 | 1;
   item: 0 | 1; // Phase 10 (optional): fire held item
   steerMode: SteerMode;
+  slot?: PlayerSlot; // STAMPED BY SERVER on relay; never trusted from the controller. Game treats undefined as 0.
 }
 
 export interface GameHello {
@@ -24,6 +31,7 @@ export interface ControllerHello {
   type: 'hello';
   role: 'controller';
   code: string;
+  wantSlot?: PlayerSlot; // reclaim a slot after phone reload (sessionStorage 'kart.controller.slot')
 }
 
 export type HelloMessage = GameHello | ControllerHello;
@@ -36,6 +44,7 @@ export interface RoomMessage {
 
 export interface JoinedMessage {
   type: 'joined';
+  slot: PlayerSlot;
 }
 
 export interface ErrorMessage {
@@ -46,6 +55,7 @@ export interface ErrorMessage {
 export interface PeerMessage {
   type: 'peer';
   event: 'controller-joined' | 'controller-left' | 'game-left';
+  slot?: PlayerSlot; // controller-joined/left carry the affected slot
 }
 
 // game -> controller: state announcements, plus 'boost'/'collision' haptic
@@ -65,6 +75,9 @@ export type EventName =
 export interface EventMessage {
   type: 'event';
   name: EventName;
+  // game -> controller: targets one phone's haptics; omitted = broadcast to both.
+  // controller -> game: server stamps the sender's slot on 'start'/'restart'.
+  slot?: PlayerSlot;
 }
 
 export interface PingMessage {
@@ -123,7 +136,7 @@ function isAnyMessage(obj: unknown): obj is AnyMessage {
     case 'room':
       return isRoomMessage(obj as RoomMessage);
     case 'joined':
-      return true;
+      return isJoinedMessage(obj as JoinedMessage);
     case 'error':
       return isErrorMessage(obj as ErrorMessage);
     case 'peer':
@@ -141,6 +154,10 @@ function isAnyMessage(obj: unknown): obj is AnyMessage {
   }
 }
 
+function isPlayerSlot(v: unknown): v is PlayerSlot {
+  return v === 0 || v === 1;
+}
+
 export function isHelloMessage(m: unknown): m is HelloMessage {
   const o = m as Partial<HelloMessage> & { role?: string };
   if (typeof o !== 'object' || o === null) return false;
@@ -150,9 +167,14 @@ export function isHelloMessage(m: unknown): m is HelloMessage {
   }
   if (o.role === 'controller') {
     const c = o as Partial<ControllerHello>;
-    return typeof c.code === 'string';
+    return typeof c.code === 'string' && (c.wantSlot === undefined || isPlayerSlot(c.wantSlot));
   }
   return false;
+}
+
+export function isJoinedMessage(m: unknown): m is JoinedMessage {
+  const o = m as Partial<JoinedMessage>;
+  return isPlayerSlot(o.slot);
 }
 
 export function isRoomMessage(m: unknown): m is RoomMessage {
@@ -167,7 +189,10 @@ export function isErrorMessage(m: unknown): m is ErrorMessage {
 
 export function isPeerMessage(m: unknown): m is PeerMessage {
   const o = m as Partial<PeerMessage>;
-  return o.event === 'controller-joined' || o.event === 'controller-left' || o.event === 'game-left';
+  return (
+    (o.event === 'controller-joined' || o.event === 'controller-left' || o.event === 'game-left') &&
+    (o.slot === undefined || isPlayerSlot(o.slot))
+  );
 }
 
 const EVENT_NAMES: EventName[] = [
@@ -184,7 +209,11 @@ const EVENT_NAMES: EventName[] = [
 
 export function isEventMessage(m: unknown): m is EventMessage {
   const o = m as Partial<EventMessage>;
-  return typeof o.name === 'string' && (EVENT_NAMES as string[]).includes(o.name);
+  return (
+    typeof o.name === 'string' &&
+    (EVENT_NAMES as string[]).includes(o.name) &&
+    (o.slot === undefined || isPlayerSlot(o.slot))
+  );
 }
 
 export function isInputSnapshot(m: unknown): m is InputSnapshot {
@@ -196,7 +225,8 @@ export function isInputSnapshot(m: unknown): m is InputSnapshot {
     (o.brake === 0 || o.brake === 1) &&
     (o.drift === 0 || o.drift === 1) &&
     (o.item === 0 || o.item === 1) &&
-    (o.steerMode === 'touch' || o.steerMode === 'tilt')
+    (o.steerMode === 'touch' || o.steerMode === 'tilt') &&
+    (o.slot === undefined || isPlayerSlot(o.slot))
   );
 }
 

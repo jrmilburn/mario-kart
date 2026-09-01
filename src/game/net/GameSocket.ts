@@ -4,6 +4,7 @@ import {
   type EventName,
   type GameToServer,
   type InputSnapshot,
+  type PlayerSlot,
 } from '../../shared/protocol';
 
 const ROOM_STORAGE_KEY = 'kart.game.roomCode';
@@ -14,9 +15,9 @@ export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting';
 
 export interface GameSocketCallbacks {
   onRoom?: (code: string, joinUrl: string) => void;
-  onPeer?: (event: 'controller-joined' | 'controller-left' | 'game-left') => void;
+  onPeer?: (event: 'controller-joined' | 'controller-left' | 'game-left', slot?: PlayerSlot) => void;
   onInput?: (snapshot: InputSnapshot) => void;
-  onEvent?: (name: EventName) => void; // commands relayed from the controller (start/restart)
+  onEvent?: (name: EventName, slot?: PlayerSlot) => void; // commands relayed from the controller (start/restart)
   onStatus?: (status: ConnectionStatus) => void;
   onRtt?: (rttMs: number) => void;
 }
@@ -61,13 +62,13 @@ export class GameSocket {
           this.callbacks.onRoom?.(msg.code, msg.joinUrl);
           break;
         case 'peer':
-          this.callbacks.onPeer?.(msg.event as 'controller-joined' | 'controller-left' | 'game-left');
+          this.callbacks.onPeer?.(msg.event as 'controller-joined' | 'controller-left' | 'game-left', msg.slot);
           break;
         case 'input':
           this.callbacks.onInput?.(msg);
           break;
         case 'event':
-          this.callbacks.onEvent?.(msg.name);
+          this.callbacks.onEvent?.(msg.name, msg.slot);
           break;
         case 'pong': {
           const sentAt = this.pendingPings.get(msg.t);
@@ -118,8 +119,8 @@ export class GameSocket {
     }
   }
 
-  sendEvent(name: EventName) {
-    this.sendRaw({ type: 'event', name });
+  sendEvent(name: EventName, slot?: PlayerSlot) {
+    this.sendRaw({ type: 'event', name, slot });
   }
 
   private sendRaw(msg: GameToServer) {
