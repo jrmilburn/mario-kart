@@ -1,6 +1,9 @@
 import QRCode from 'qrcode';
 import type { ConnectionStatus } from '../net/GameSocket';
 import type { SteerMode } from '../../shared/protocol';
+import type { ItemType } from '../items/ItemSystem';
+
+const ITEM_ICONS: Record<ItemType, string> = { mushroom: '🍄', banana: '🍌', shell: '🐚' };
 
 export class Hud {
   private root: HTMLDivElement;
@@ -11,6 +14,7 @@ export class Hud {
   private peerEl: HTMLDivElement;
   private kbBadge: HTMLDivElement;
   private steerModeBadge: HTMLDivElement;
+  private itemSlot: HTMLDivElement;
   private driftBar: HTMLDivElement;
   private driftFill: HTMLDivElement;
   private raceInfo: HTMLDivElement;
@@ -52,6 +56,13 @@ export class Hud {
     this.driftFill.style.cssText = 'height:100%; width:0%; background:#3498db; transition:background 0.1s;';
     this.driftBar.appendChild(this.driftFill);
     this.root.appendChild(this.driftBar);
+
+    this.itemSlot = document.createElement('div');
+    this.itemSlot.style.cssText =
+      'position:absolute; top:52px; left:12px; width:56px; height:56px; border-radius:12px; ' +
+      'background:rgba(0,0,0,0.4); border:2px solid rgba(255,255,255,0.4); display:none; ' +
+      'align-items:center; justify-content:center; font-size:30px;';
+    this.root.appendChild(this.itemSlot);
 
     this.lobbyPanel = document.createElement('div');
     this.lobbyPanel.style.cssText =
@@ -154,6 +165,16 @@ export class Hud {
     const colors = ['#7f8c8d', '#3498db', '#e67e22', '#9b59b6']; // gray, blue, orange, purple
     this.driftFill.style.background = colors[Math.min(tier, colors.length - 1)];
     this.driftFill.style.width = `${Math.round(Math.min(Math.max(progress, 0), 1) * 100)}%`;
+  }
+
+  // display: the item to show (flickers during roulette, locks once held.item is set).
+  setHeldItem(display: ItemType | null) {
+    if (!display) {
+      this.itemSlot.style.display = 'none';
+      return;
+    }
+    this.itemSlot.style.display = 'flex';
+    this.itemSlot.textContent = ITEM_ICONS[display];
   }
 
   hideLobby() {

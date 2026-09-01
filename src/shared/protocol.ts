@@ -10,6 +10,7 @@ export interface InputSnapshot {
   throttle: 0 | 1;
   brake: 0 | 1;
   drift: 0 | 1;
+  item: 0 | 1; // Phase 10 (optional): fire held item
   steerMode: SteerMode;
 }
 
@@ -174,6 +175,7 @@ export function isInputSnapshot(m: unknown): m is InputSnapshot {
     (o.throttle === 0 || o.throttle === 1) &&
     (o.brake === 0 || o.brake === 1) &&
     (o.drift === 0 || o.drift === 1) &&
+    (o.item === 0 || o.item === 1) &&
     (o.steerMode === 'touch' || o.steerMode === 'tilt')
   );
 }

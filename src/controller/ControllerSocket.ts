@@ -18,6 +18,7 @@ export interface ControllerInput {
   throttle: 0 | 1;
   brake: 0 | 1;
   drift: 0 | 1;
+  item: 0 | 1;
   steerMode: SteerMode;
 }
 
@@ -123,6 +124,7 @@ export class ControllerSocket {
         throttle: input.throttle,
         brake: input.brake,
         drift: input.drift,
+        item: input.item,
         steerMode: input.steerMode,
       });
     }, SEND_INTERVAL_MS);

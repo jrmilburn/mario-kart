@@ -103,3 +103,40 @@ export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number
 
   visual.shadow.position.set(kart.pos.x, 0.02, kart.pos.z);
 }
+
+// §Phase 10 item visuals -----------------------------------------------------
+
+// Rotating vertex-colored cube; caller toggles .visible with box.active.
+export function buildItemBoxMesh(): THREE.Mesh {
+  const geo = new THREE.BoxGeometry(1, 1, 1);
+  const faceColors = [0xe74c3c, 0x3498db, 0xf1c40f, 0x2ecc71, 0xe67e22, 0x9b59b6];
+  const colors: number[] = [];
+  const c = new THREE.Color();
+  for (let face = 0; face < 6; face++) {
+    c.set(faceColors[face]);
+    for (let v = 0; v < 4; v++) colors.push(c.r, c.g, c.b);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  mesh.position.y = 0.6;
+  return mesh;
+}
+
+export function buildBananaMesh(): THREE.Mesh {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.3, 8, 6),
+    new THREE.MeshLambertMaterial({ color: 0xf5d327 }),
+  );
+  mesh.scale.set(1.6, 0.55, 0.7);
+  mesh.position.y = 0.2;
+  return mesh;
+}
+
+export function buildShellMesh(): THREE.Mesh {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.35, 10, 8),
+    new THREE.MeshLambertMaterial({ color: 0x2ecc71 }),
+  );
+  mesh.position.y = 0.4;
+  return mesh;
+}

@@ -110,6 +110,7 @@ export function think(
       throttle: tightAndFast ? 0 : 1,
       brake: tightAndFast ? 1 : 0,
       drift: ai.driftHeld ? 1 : 0,
+      item: 0, // AI item use is decided separately by tickAiItemDecision, not via ControlState
     },
     topSpeedScale,
   };

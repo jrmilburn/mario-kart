@@ -129,8 +129,13 @@ export function initControllerUI(root: HTMLElement) {
   controlsRow.style.cssText = 'display:flex; justify-content:space-between; align-items:flex-end; gap:16px;';
   playPanel.appendChild(controlsRow);
 
+  const leftCluster = document.createElement('div');
+  leftCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px; align-items:stretch;';
+  controlsRow.appendChild(leftCluster);
+
+  const itemBtn = makeHoldButton('ITEM', '#f39c12', 'width:120px; height:64px;');
   const brakeBtn = makeHoldButton('BRAKE', '#c0392b', 'width:120px; height:80px;');
-  controlsRow.appendChild(brakeBtn.el);
+  leftCluster.append(itemBtn.el, brakeBtn.el);
 
   const rightCluster = document.createElement('div');
   rightCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px; align-items:stretch;';
@@ -365,6 +370,7 @@ export function initControllerUI(root: HTMLElement) {
         throttle: throttleBtn.active,
         brake: brakeBtn.active,
         drift: driftBtn.active,
+        item: itemBtn.active,
         steerMode,
       }),
       {

@@ -6,7 +6,16 @@ import { Diagnostics } from './ui/Diagnostics';
 import { startLoop } from './core/loop';
 import { createKart, driftTier, stepKart, type KartState } from './physics/Kart';
 import { resolveWallCollision, resolveKartKartCollisions } from './physics/collision';
-import { buildGround, buildLights, buildKart, updateKartVisual, type KartVisual } from './render/SceneBuilder';
+import {
+  buildGround,
+  buildLights,
+  buildKart,
+  updateKartVisual,
+  buildItemBoxMesh,
+  buildBananaMesh,
+  buildShellMesh,
+  type KartVisual,
+} from './render/SceneBuilder';
 import { FollowCamera } from './render/FollowCamera';
 import { buildTrack } from './track/TrackBuilder';
 import { TrackQuery, sampleAtArcLength } from './track/TrackQuery';
@@ -15,8 +24,22 @@ import { TUNING } from './tuning';
 import { LapTracker, TOTAL_LAPS, createLapProgress, type LapProgress } from './race/LapTracker';
 import { RaceDirector } from './race/RaceDirector';
 import { createAiState, think, type AiState } from './ai/AiDriver';
-
-const NEUTRAL_CONTROL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0 };
+import {
+  createItemBoxes,
+  createHeldItemState,
+  updateItemBoxes,
+  tryPickupItemBox,
+  updateRoulette,
+  useItem,
+  updateBananas,
+  updateShells,
+  tickAiItemDecision,
+  type ItemBoxState,
+  type HeldItemState,
+  type Banana,
+  type Shell,
+} from './items/ItemSystem';
+const NEUTRAL_CONTROL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0, item: 0 };
 const PLAYER_FINISH_DELAY_SECONDS = 1.5;
 
 interface KartEntity {
@@ -27,6 +50,8 @@ interface KartEntity {
   name: string;
   spawnS: number;
   spawnLane: number;
+  itemState: HeldItemState;
+  prevItemInput: 0 | 1;
 }
 
 const app = document.getElementById('app')!;
@@ -79,15 +104,72 @@ const entities: KartEntity[] = GRID.map((g) => {
     name: g.name,
     spawnS: g.s,
     spawnLane: g.lane,
+    itemState: createHeldItemState(),
+    prevItemInput: 0 as const,
   };
 });
 const player = entities[0];
+
+// §Phase 10 items: 6 fixed boxes with their own rotating visual meshes, plus
+// dynamic banana/shell projectiles synced to THREE meshes each render frame.
+const itemBoxes: ItemBoxState[] = createItemBoxes(track.samples);
+const itemBoxVisuals = itemBoxes.map((box) => {
+  const mesh = buildItemBoxMesh();
+  mesh.position.copy(track.samples[box.sampleIdx].pos).add(new THREE.Vector3(0, 0.6, 0));
+  scene.add(mesh);
+  return mesh;
+});
+const bananas: Banana[] = [];
+const shells: Shell[] = [];
+const bananaVisuals = new Map<Banana, THREE.Mesh>();
+const shellVisuals = new Map<Shell, THREE.Mesh>();
 
 const followCamera = new FollowCamera(camera);
 const lapTracker = new LapTracker(track.checkpoints, track.samples, track.totalLength);
 
 let finishCounter = 0;
 let playerFinishTimer: number | null = null;
+
+// Immediately ahead of `selfIndex` by race progress; null if already leading
+// (nothing to target a homing shell at).
+function findNextAhead(selfIndex: number): number | null {
+  const self = entities[selfIndex];
+  let best: number | null = null;
+  let bestProgress = Infinity;
+  entities.forEach((e, i) => {
+    if (i === selfIndex) return;
+    if (e.lapProgress.progress > self.lapProgress.progress && e.lapProgress.progress < bestProgress) {
+      bestProgress = e.lapProgress.progress;
+      best = i;
+    }
+  });
+  return best;
+}
+
+// Keeps a THREE.Mesh per live projectile object, adding/removing as items
+// spawn/despawn. `items` is small (a handful of bananas/shells at most).
+function syncProjectileVisuals<T extends { pos: THREE.Vector3 }>(
+  items: T[],
+  visuals: Map<T, THREE.Mesh>,
+  build: () => THREE.Mesh,
+  targetScene: THREE.Scene,
+) {
+  for (const [obj, mesh] of visuals) {
+    if (!items.includes(obj)) {
+      targetScene.remove(mesh);
+      visuals.delete(obj);
+    }
+  }
+  for (const obj of items) {
+    let mesh = visuals.get(obj);
+    if (!mesh) {
+      mesh = build();
+      targetScene.add(mesh);
+      visuals.set(obj, mesh);
+    }
+    mesh.position.copy(obj.pos);
+  }
+}
 
 function resetRace() {
   for (const e of entities) {
@@ -106,7 +188,15 @@ function resetRace() {
       e.ai.wallScrapeTimer = 0;
       e.ai.driftHeld = false;
     }
+    e.itemState = createHeldItemState();
+    e.prevItemInput = 0;
   }
+  for (const box of itemBoxes) {
+    box.active = true;
+    box.respawnTimer = 0;
+  }
+  bananas.length = 0;
+  shells.length = 0;
   finishCounter = 0;
   playerFinishTimer = null;
 }
@@ -191,8 +281,10 @@ startLoop(
     if (raceDirector.state === 'PAUSED') return; // physics frozen entirely
 
     const racing = raceDirector.state === 'RACING';
+    if (racing) updateItemBoxes(itemBoxes, dt);
 
-    for (const e of entities) {
+    for (let i = 0; i < entities.length; i++) {
+      const e = entities[i];
       const preSample = trackQuery.nearestSample(e.kart.pos);
       const offRoad = Math.abs(preSample.lateral) > ROAD_HALF;
       const onWall = Math.abs(preSample.lateral) >= GRASS_HALF - TUNING.kartRadius;
@@ -223,12 +315,37 @@ startLoop(
 
       stepKart(e.kart, control, dt, offRoad, topSpeedScale);
       resolveWallCollision(e.kart, trackQuery);
+
+      if (racing) {
+        tryPickupItemBox(itemBoxes, track.samples, e.kart.pos, e.itemState);
+        updateRoulette(e.itemState, dt);
+
+        const itemPressed = control.item === 1 && e.prevItemInput === 0;
+        e.prevItemInput = control.item;
+        const wantsFire = e.ai ? tickAiItemDecision(e.itemState, dt) : itemPressed;
+        if (wantsFire) {
+          useItem({
+            kartIndex: i,
+            kart: e.kart,
+            held: e.itemState,
+            bananas,
+            shells,
+            targetIndex: findNextAhead(i),
+            fireS: trackQuery.nearestSample(e.kart.pos).s,
+          });
+        }
+      }
     }
 
     resolveKartKartCollisions(
       entities.map((e) => e.kart),
       dt,
     );
+
+    if (racing) {
+      updateBananas(bananas, entities.map((e) => e.kart));
+      updateShells(shells, entities.map((e) => e.kart), track.samples, track.totalLength, dt);
+    }
 
     if (racing) {
       for (const e of entities) {
@@ -265,6 +382,21 @@ startLoop(
     const driftActive = player.kart.drift.phase === 'active';
     const maxTierTime = TUNING.driftTierTimes[TUNING.driftTierTimes.length - 1];
     hud.setDriftCharge(driftActive, driftTier(player.kart.drift.charge), player.kart.drift.charge / maxTierTime);
+
+    // Item box visuals: rotate continuously, hide while respawning.
+    itemBoxes.forEach((box, i) => {
+      const mesh = itemBoxVisuals[i];
+      mesh.visible = box.active;
+      mesh.rotation.y += renderDt * 1.5;
+    });
+
+    // Sync banana/shell meshes to their live-object arrays (create/remove as needed).
+    syncProjectileVisuals(bananas, bananaVisuals, buildBananaMesh, scene);
+    syncProjectileVisuals(shells, shellVisuals, buildShellMesh, scene);
+
+    const playerHeldDisplay =
+      player.itemState.rouletteTimer > 0 ? player.itemState.rouletteDisplay : player.itemState.item;
+    hud.setHeldItem(playerHeldDisplay);
 
     const ranked = [...entities].sort(comparePosition);
     const playerPosition = ranked.indexOf(player) + 1;

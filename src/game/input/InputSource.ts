@@ -5,9 +5,10 @@ export interface ControlState {
   throttle: 0 | 1;
   brake: 0 | 1;
   drift: 0 | 1;
+  item: 0 | 1;
 }
 
-const NEUTRAL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0 };
+const NEUTRAL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0, item: 0 };
 
 // Keyboard input stays "active" this long after the last mapped keypress (D12).
 const KEYBOARD_OVERRIDE_MS = 2000;
@@ -17,12 +18,14 @@ const BRAKE_CODES = ['KeyS', 'ArrowDown'];
 const LEFT_CODES = ['KeyA', 'ArrowLeft'];
 const RIGHT_CODES = ['KeyD', 'ArrowRight'];
 const DRIFT_CODES = ['ShiftLeft', 'ShiftRight'];
+const ITEM_CODES = ['KeyK'];
 const MAPPED_CODES = new Set([
   ...THROTTLE_CODES,
   ...BRAKE_CODES,
   ...LEFT_CODES,
   ...RIGHT_CODES,
   ...DRIFT_CODES,
+  ...ITEM_CODES,
 ]);
 
 export interface InputDiagnostics {
@@ -79,7 +82,14 @@ export class InputSource {
     const throttle = THROTTLE_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
     const brake = BRAKE_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
     const drift = DRIFT_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
-    return { steer, throttle: throttle as 0 | 1, brake: brake as 0 | 1, drift: drift as 0 | 1 };
+    const item = ITEM_CODES.some((c) => this.keysDown.has(c)) ? 1 : 0;
+    return {
+      steer,
+      throttle: throttle as 0 | 1,
+      brake: brake as 0 | 1,
+      drift: drift as 0 | 1,
+      item: item as 0 | 1,
+    };
   }
 
   isKeyboardActive(now: number): boolean {
@@ -92,7 +102,7 @@ export class InputSource {
     }
     if (this.latestSnapshot && now - this.latestReceivedAt < INPUT_STALE_MS) {
       const s = this.latestSnapshot;
-      return { steer: s.steer, throttle: s.throttle, brake: s.brake, drift: s.drift };
+      return { steer: s.steer, throttle: s.throttle, brake: s.brake, drift: s.drift, item: s.item };
     }
     return NEUTRAL;
   }
