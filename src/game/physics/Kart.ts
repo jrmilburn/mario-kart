@@ -117,9 +117,13 @@ export function stepKart(
   }
 
   if (effectiveOffRoad && kart.boostTimer <= 0) {
-    const cap = T.topSpeed * T.offRoadSpeedCap;
+    // §Phase 4 finding #1: sand is mechanically distinct from plain grass —
+    // a lower cap and a stronger decel, not just the same offRoad penalty.
+    const capFrac = surface === 'sand' ? T.sandSpeedCap : T.offRoadSpeedCap;
+    const decel = surface === 'sand' ? T.sandDecel : T.offRoadDecel;
+    const cap = T.topSpeed * capFrac;
     if (Math.abs(kart.speed) > cap) {
-      kart.speed = moveToward(kart.speed, Math.sign(kart.speed) * cap, T.offRoadDecel * dt);
+      kart.speed = moveToward(kart.speed, Math.sign(kart.speed) * cap, decel * dt);
     }
   }
 

@@ -5,7 +5,31 @@ export const TOTAL_LAPS = 3;
 
 // Guards teleport/wrap glitches: a checkpoint crossing is only valid if both
 // the current and previous wrapDelta magnitudes are within this range (§3.5).
-const WRAP_GUARD = 30;
+// Must stay comfortably under half the tightest gap between consecutive
+// checkpoints, or a kart moving fast enough could get wrap-guarded out of a
+// legitimate crossing near that gap. checkWrapGuardSafety (called from
+// TrackBuilder.buildTrack, right where checkpoint spacing is computed)
+// verifies that margin at startup (§Phase 4 finding #6).
+const WRAP_GUARD = 24;
+
+// Safety margin checkWrapGuardSafety enforces: WRAP_GUARD must be no more
+// than this fraction of half the tightest checkpoint gap.
+const WRAP_GUARD_SAFETY_FRACTION = 0.8;
+
+// Warns at startup if WRAP_GUARD isn't comfortably below half the tightest
+// checkpoint gap in the current track layout — a layout change that shrinks
+// checkpoint spacing below that margin could silently reintroduce
+// missed/duplicate lap crossings near the tight gap.
+export function checkWrapGuardSafety(minCheckpointGapMeters: number) {
+  const limit = WRAP_GUARD_SAFETY_FRACTION * (minCheckpointGapMeters / 2);
+  if (WRAP_GUARD > limit) {
+    console.warn(
+      `[LapTracker] WRAP_GUARD (${WRAP_GUARD}) exceeds ${WRAP_GUARD_SAFETY_FRACTION * 100}% of half the tightest ` +
+        `checkpoint gap (${minCheckpointGapMeters.toFixed(2)}m gap, safe limit ${limit.toFixed(2)}m) — ` +
+        `lap-crossing detection may be unreliable near that gap.`,
+    );
+  }
+}
 
 export interface LapProgress {
   lap: number;

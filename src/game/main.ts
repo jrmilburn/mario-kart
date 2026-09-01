@@ -12,6 +12,7 @@ import { resolveWallCollision, resolveKartKartCollisions } from './physics/colli
 import {
   buildLights,
   updateLightTarget,
+  updateShadowBounds,
   buildKart,
   setDriver,
   setKartColor,
@@ -86,6 +87,12 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// §Phase 4 finding #2: split-screen calls renderer.render() twice per frame;
+// autoUpdate (default true) would redo the whole shadow pass on both calls
+// even though the shadow-casting scene hasn't changed between them. Driven
+// manually instead — needsUpdate is set once per frame, just before the first
+// render call, so exactly one shadow pass covers both viewports.
+renderer.shadowMap.autoUpdate = false;
 app.appendChild(renderer.domElement);
 
 const lights = buildLights(scene);
@@ -662,12 +669,25 @@ startLoop(
 
     // §Phase 4 item 3: shadow camera re-centers on the active players'
     // midpoint every frame (light keeps its fixed relative offset) so the
-    // ~80x80m ortho shadow box always covers whoever's actually racing.
+    // ortho shadow box always covers whoever's actually racing. Loop instead
+    // of players.filter(...) to avoid an allocation every frame (§Phase 4
+    // finding #4).
     shadowMidpoint.set(0, 0, 0);
-    const activeForShadow = players.filter((p) => p.active);
-    for (const p of activeForShadow) shadowMidpoint.add(entityFor(p).kart.pos);
-    shadowMidpoint.divideScalar(activeForShadow.length || 1);
+    let activeShadowCount = 0;
+    for (const p of players) {
+      if (!p.active) continue;
+      shadowMidpoint.add(entityFor(p).kart.pos);
+      activeShadowCount++;
+    }
+    shadowMidpoint.divideScalar(activeShadowCount || 1);
     updateLightTarget(lights.directional, shadowMidpoint);
+    // §Phase 4 finding #3: a straight-line midpoint can leave one split
+    // player outside a fixed-size ortho box when they're far apart, so the
+    // box itself grows with the players' separation while split.
+    const shadowPlayerDistance = split
+      ? entityFor(players[0]).kart.pos.distanceTo(entityFor(players[1]).kart.pos)
+      : 0;
+    updateShadowBounds(lights, shadowPlayerDistance);
 
     // §Phase 11a/b: drift sparks tinted by tier, engine pitch mapped to speed.
     for (const e of entities) {
@@ -764,6 +784,11 @@ startLoop(
       nextCheckpoint: player.lapProgress.nextCheckpoint,
       stepsThisFrame,
     });
+
+    // §Phase 4 finding #2: with autoUpdate off, the shadow pass only runs
+    // when needsUpdate is set — do it once here rather than let it run (or
+    // not) implicitly inside each render() call below.
+    renderer.shadowMap.needsUpdate = true;
 
     if (split) {
       const w = window.innerWidth;

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { damp } from '../../shared/mathUtils';
+import { clamp, damp } from '../../shared/mathUtils';
 import { TUNING } from '../tuning';
 import type { KartState } from '../physics/Kart';
 import type { CharacterDef, CharacterFallbackColors } from '../characters/registry';
@@ -21,6 +21,7 @@ export interface KartVisual {
 
 export interface Lights {
   directional: THREE.DirectionalLight;
+  shadowHalfSize: number; // current ortho shadow-camera half-extent, tracked so updateShadowBounds can skip sub-1m no-op updates (§Phase 4 finding #3)
 }
 
 // §Phase 4 item 3: fixed offset from whatever point the directional light's
@@ -28,7 +29,8 @@ export interface Lights {
 // constant every frame so the light always views the target from the same
 // angle, just from a re-centered position.
 export const SHADOW_LIGHT_OFFSET = new THREE.Vector3(40, 70, 30);
-const SHADOW_HALF_SIZE = 40; // ~80x80m ortho shadow camera (§Phase 4 item 3)
+const SHADOW_HALF_SIZE = 40; // ~80x80m ortho shadow camera, the solo/default extent (§Phase 4 item 3)
+const SHADOW_HALF_SIZE_MAX = 90; // widest the ortho box is allowed to grow to cover a spread-out split-screen pair (§Phase 4 finding #3)
 
 export function buildLights(scene: THREE.Scene): Lights {
   scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x4a6b3a, 1.2));
@@ -45,7 +47,7 @@ export function buildLights(scene: THREE.Scene): Lights {
   dir.position.copy(SHADOW_LIGHT_OFFSET);
   scene.add(dir);
   scene.add(dir.target);
-  return { directional: dir };
+  return { directional: dir, shadowHalfSize: SHADOW_HALF_SIZE };
 }
 
 // Re-centers the shadow camera on `target` (world-space) each frame, keeping
@@ -56,6 +58,27 @@ export function buildLights(scene: THREE.Scene): Lights {
 export function updateLightTarget(dir: THREE.DirectionalLight, target: THREE.Vector3) {
   dir.target.position.copy(target);
   dir.position.copy(target).add(SHADOW_LIGHT_OFFSET);
+}
+
+// §Phase 4 finding #3: the fixed ~80x80m ortho box was sized for one kart and
+// can miss one or both split-screen players when they're spread out. Grows
+// the box with player separation (half tracks playerDistance/2 + a 15m
+// margin), clamped to [SHADOW_HALF_SIZE, SHADOW_HALF_SIZE_MAX]. Touches the
+// shadow camera (and its relatively expensive updateProjectionMatrix) only
+// when the desired size actually differs from the current one by more than
+// 1m, so steady-state split-screen racing doesn't re-upload the projection
+// every frame over sub-meter jitter. `playerDistance` should be 0 outside
+// split-screen, which settles back to the SHADOW_HALF_SIZE default.
+export function updateShadowBounds(lights: Lights, playerDistance: number) {
+  const desired = clamp(Math.max(SHADOW_HALF_SIZE, playerDistance / 2 + 15), SHADOW_HALF_SIZE, SHADOW_HALF_SIZE_MAX);
+  if (Math.abs(desired - lights.shadowHalfSize) <= 1) return;
+  lights.shadowHalfSize = desired;
+  const cam = lights.directional.shadow.camera;
+  cam.left = -desired;
+  cam.right = desired;
+  cam.top = desired;
+  cam.bottom = -desired;
+  cam.updateProjectionMatrix();
 }
 
 // Kart's local "nose" points toward +Z (matches physics/Kart.ts kartForward()).

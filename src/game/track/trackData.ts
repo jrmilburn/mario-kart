@@ -52,9 +52,19 @@ export interface SurfaceZone {
 // punishing a tight inside cut through the hairpin apex (s=717.5). Re-placed
 // here for the §Phase 4 item 5 layout (was authored against the old ~620m
 // layout in §Phase 4 item 4).
+//
+// §Phase 4 finding #1: the sand zone's latMin sits *inside* ROAD_HALF (not at
+// or beyond it) so the patch straddles the pavement itself along the apex's
+// inside line, not just the grass beyond the road edge -- that grass is
+// already penalized identically by the plain offRoad check, so a zone
+// confined to it would be a mechanical no-op. A kart hugging the tight inside
+// line through the apex (positive lateral, matching this right-hand hairpin's
+// inside) now drives through sand while still nominally on the road; the
+// wider/safer line past latMax stays clean. See Kart.ts's sandSpeedCap/sandDecel
+// for why sand and grass now feel different, too.
 export const SURFACE_ZONES: SurfaceZone[] = [
   { sStart: 55, sEnd: 65, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
   { sStart: 515, sEnd: 528, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
   { sStart: 815, sEnd: 828, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
-  { sStart: 705, sEnd: 725, type: 'sand', latMin: ROAD_HALF, latMax: GRASS_HALF - 1 },
+  { sStart: 705, sEnd: 725, type: 'sand', latMin: 2, latMax: 9 },
 ];

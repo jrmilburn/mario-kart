@@ -1,9 +1,11 @@
 import * as THREE from 'three';
 import { CONTROL_POINTS, ROAD_HALF, GRASS_HALF, CHECKPOINT_COUNT, SURFACE_ZONES, type SurfaceZone } from './trackData';
 import { buildAsphaltTexture, buildGrassTexture, tryLoadTextureOverride } from '../render/textures';
-// Value import from TrackQuery is safe here (no runtime cycle): TrackQuery's
-// only import of this module is `import type`, which is erased at compile time.
+// Value imports from TrackQuery/LapTracker are safe here (no runtime cycle):
+// TrackQuery's only import of this module is `import type`, and LapTracker's
+// is too — both erased at compile time.
 import { sampleAtArcLength } from './TrackQuery';
+import { checkWrapGuardSafety } from '../race/LapTracker';
 
 export interface TrackSample {
   pos: THREE.Vector3;
@@ -70,16 +72,23 @@ function buildSamples(): { samples: TrackSample[]; totalLength: number } {
   return { samples, totalLength };
 }
 
-// u = cross-section position 0 (left edge) .. 1 (right edge); v = arc length / TEXTURE_V_SCALE.
+// u = signed lateral offset in meters / TEXTURE_V_SCALE; v = arc length /
+// TEXTURE_V_SCALE. §Phase 4 finding #5: u used to span the fixed range 0..1
+// across the road regardless of its 12m width, giving it a texel density
+// completely different from v's meters-based scale (and from the ground
+// plane's) — a road-width tile read far coarser than the same texture tiling
+// along its length. Deriving u from meters at the same TEXTURE_V_SCALE keeps
+// texel density uniform in both directions; RepeatWrapping (set in
+// textures.ts) handles the resulting u range extending past [0,1].
 // The final cross-section ring is a *duplicate* of ring 0 (ringCount = n+1, not
 // n), placed at the same position but carrying v = totalLength/TEXTURE_V_SCALE
 // instead of wrapping back to v = 0 — otherwise the texture would visibly jump
 // at the start/finish seam. Index math below walks 0..n-1 -> i, i+1 with no
 // modulo, since the duplicate ring supplies the "+1" vertex for the last band.
-const U_EDGE_L = 0;
-const U_STRIPE_L = STRIPE_WIDTH / (2 * ROAD_HALF);
-const U_STRIPE_R = 1 - STRIPE_WIDTH / (2 * ROAD_HALF);
-const U_EDGE_R = 1;
+const U_EDGE_L = -ROAD_HALF / TEXTURE_V_SCALE;
+const U_STRIPE_L = -(ROAD_HALF - STRIPE_WIDTH) / TEXTURE_V_SCALE;
+const U_STRIPE_R = (ROAD_HALF - STRIPE_WIDTH) / TEXTURE_V_SCALE;
+const U_EDGE_R = ROAD_HALF / TEXTURE_V_SCALE;
 
 function buildRoadMesh(samples: TrackSample[], totalLength: number): THREE.Mesh {
   const n = samples.length;
@@ -145,12 +154,13 @@ function buildRoadMesh(samples: TrackSample[], totalLength: number): THREE.Mesh 
   return mesh;
 }
 
-// u spans the full -GRASS_HALF..GRASS_HALF cross-section (both ribbons share
-// one texture tile); see buildRoadMesh's comment for the duplicated-ring seam fix.
-const U_OUTER_L = 0;
-const U_INNER_L = (GRASS_HALF - ROAD_HALF) / (2 * GRASS_HALF);
-const U_INNER_R = 1 - (GRASS_HALF - ROAD_HALF) / (2 * GRASS_HALF);
-const U_OUTER_R = 1;
+// u derived from meters at the same TEXTURE_V_SCALE as v (§Phase 4 finding
+// #5, see buildRoadMesh's comment) instead of spanning a fixed 0..1 across
+// the cross-section; see buildRoadMesh's comment for the duplicated-ring seam fix.
+const U_OUTER_L = -GRASS_HALF / TEXTURE_V_SCALE;
+const U_INNER_L = -ROAD_HALF / TEXTURE_V_SCALE;
+const U_INNER_R = ROAD_HALF / TEXTURE_V_SCALE;
+const U_OUTER_R = GRASS_HALF / TEXTURE_V_SCALE;
 
 function buildGrassMesh(samples: TrackSample[], totalLength: number): THREE.Mesh {
   const n = samples.length;
@@ -636,6 +646,18 @@ export function buildTrack(): TrackData {
   for (let i = 0; i < CHECKPOINT_COUNT; i++) {
     checkpoints.push(Math.round((i * SAMPLE_COUNT) / CHECKPOINT_COUNT) % SAMPLE_COUNT);
   }
+
+  // §Phase 4 finding #6: validate LapTracker's WRAP_GUARD safety margin
+  // against this layout's actual checkpoint spacing, right where that
+  // spacing is known.
+  let minCheckpointGap = Infinity;
+  for (let i = 0; i < checkpoints.length; i++) {
+    const sA = samples[checkpoints[i]].s;
+    const sB = samples[checkpoints[(i + 1) % checkpoints.length]].s;
+    const gap = (((sB - sA) % totalLength) + totalLength) % totalLength;
+    minCheckpointGap = Math.min(minCheckpointGap, gap);
+  }
+  checkWrapGuardSafety(minCheckpointGap);
 
   const group = new THREE.Group();
   group.add(buildRoadMesh(samples, totalLength));

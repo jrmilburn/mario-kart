@@ -8,6 +8,8 @@ export const TUNING = {
   coastDecel: 6, // applied when throttle=0
   offRoadSpeedCap: 0.45, // fraction of topSpeed while on grass
   offRoadDecel: 18, // extra decel while above the cap on grass
+  sandSpeedCap: 0.22, // fraction of topSpeed while on a sand surface zone -- noticeably lower than offRoadSpeedCap so cutting a corner through sand actually costs more than just running wide onto grass (§Phase 4 finding #1)
+  sandDecel: 30, // extra decel while above the cap on sand, stronger than offRoadDecel
   steerMaxYawRate: 2.4, // rad/s at low speed
   steerYawRateAtTop: 1.1, // rad/s at topSpeed (lerp by speed/topSpeed)
   steerRamp: 12, // how fast actual steer chases input (1/s, exponential damp)
