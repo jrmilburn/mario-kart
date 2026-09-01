@@ -543,12 +543,15 @@ export function initControllerUI(root: HTMLElement) {
         break;
       case 'go':
         hideRaceOverlay();
+        hideCharacterPanel();
         break;
       case 'paused':
         showRaceOverlay('Paused', false, false);
+        hideCharacterPanel();
         break;
       case 'finished':
         showRaceOverlay('🏁 Finished!', false, true);
+        hideCharacterPanel();
         break;
       case 'restart':
         break; // a 'lobby' event immediately follows and resets the overlay
@@ -595,6 +598,11 @@ export function initControllerUI(root: HTMLElement) {
           showPlay();
           showRaceOverlay('', true, false); // default to the lobby/START state until an event says otherwise
           showCharacterPanel();
+          // If we're (re)joining mid-race, the game immediately follows up with
+          // a slot-targeted event carrying its current RaceDirector state
+          // (main.ts's onPeer) — handleRaceEvent's switch then corrects the
+          // screen above (e.g. 'countdown'/'paused' hide the character panel).
+          // A genuine lobby join gets no such event, so this default stands.
           wakeLock.start();
           // Tilt is the default steering mode; attempt it once per session,
           // falling back to touch (with a one-tap retry toast) if unavailable.

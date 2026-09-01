@@ -102,7 +102,23 @@ export function buildKart(def: CharacterDef): KartVisual {
 // after the fallback was already showing): always clears whatever was mounted first.
 export function setDriver(visual: KartVisual, def: CharacterDef, model: THREE.Object3D | null) {
   const anchor = visual.driverAnchor;
-  while (anchor.children.length > 0) anchor.remove(anchor.children[0]);
+  while (anchor.children.length > 0) {
+    const child = anchor.children[0];
+    anchor.remove(child);
+    // Only dispose procedural-fallback meshes (tagged below): GLTF-sourced
+    // children share geometry/material with the cached original via
+    // clone(true), so disposing those would corrupt every other kart using
+    // the same cached model.
+    if (child.userData.disposable) {
+      child.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.geometry.dispose();
+          if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
+          else obj.material.dispose();
+        }
+      });
+    }
+  }
 
   if (model) {
     model.scale.setScalar(def.scale);
@@ -126,6 +142,10 @@ export function setKartColor(visual: KartVisual, color: number) {
 // with zero GLB files present (the default, shippable state).
 function buildFallbackDriver(colors: CharacterFallbackColors): THREE.Group {
   const driver = new THREE.Group();
+  // Tag so setDriver() knows it's safe (and necessary) to dispose these
+  // meshes' geometry/material on removal — unlike GLTF-sourced children,
+  // nothing else references them.
+  driver.userData.disposable = true;
 
   const torso = new THREE.Mesh(
     new THREE.BoxGeometry(0.5, 0.5, 0.4),

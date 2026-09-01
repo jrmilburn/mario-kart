@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CONTROLLER_ABSENT_MS, type PlayerSlot } from '../shared/protocol';
+import { CONTROLLER_ABSENT_MS, type EventName, type PlayerSlot } from '../shared/protocol';
 import { GameSocket } from './net/GameSocket';
 import { type ControlState } from './input/InputSource';
 import { createPlayer, type Player } from './player/Player';
@@ -398,6 +398,24 @@ playerHuds[1].setLayout('hidden');
 const diagnostics = new Diagnostics(app);
 let lastRttMs: number | null = null;
 
+// Maps a RaceDirector state to the EventName that puts a controller's
+// handleRaceEvent switch (ui.ts) on the matching screen — used to sync a
+// freshly-(re)joined controller onto whatever the race is already doing.
+function raceStateToEvent(state: RaceDirector['state']): EventName {
+  switch (state) {
+    case 'LOBBY':
+      return 'lobby';
+    case 'COUNTDOWN':
+      return 'countdown';
+    case 'RACING':
+      return 'go';
+    case 'PAUSED':
+      return 'paused';
+    case 'FINISHED':
+      return 'finished';
+  }
+}
+
 const raceDirector = new RaceDirector({
   onEvent: (name) => socket.sendEvent(name), // broadcast to both controllers (no slot)
   onStateChange: (state) => {
@@ -431,6 +449,7 @@ function trySelectCharacter(slot: PlayerSlot, characterId: string) {
   if (raceDirector.state !== 'LOBBY') return;
   const def = CHARACTERS_BY_ID[characterId];
   if (!def) return;
+  if (entityFor(players[slot]).characterId === characterId) return; // already selected, nothing to do
   const other = players[slot === 0 ? 1 : 0];
   if (other.connected && entityFor(other).characterId === characterId) return; // taken
   applyCharacterToEntity(entityFor(players[slot]), def);
@@ -451,6 +470,13 @@ const socket = new GameSocket({
     // panel; the other controller needs to know this slot just freed up (or
     // claimed) its character (§Phase 3).
     if (event === 'controller-joined' || event === 'controller-left') broadcastRoster();
+    // A controller that (re)joins mid-race defaults to the character-select
+    // screen (ui.ts's onJoined); if the race has already moved past LOBBY,
+    // push the current RaceDirector state to just that slot so it lands on
+    // the right screen instead of being stuck on the character grid.
+    if (event === 'controller-joined' && raceDirector.state !== 'LOBBY') {
+      socket.sendEvent(raceStateToEvent(raceDirector.state), s);
+    }
   },
   onInput: (snapshot) => {
     const slot = snapshot.slot ?? 0;
