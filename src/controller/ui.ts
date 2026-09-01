@@ -1,6 +1,8 @@
 import type { EventName } from '../shared/protocol';
+import { TUNING } from '../game/tuning';
 import { ControllerSocket, getStoredRoomCode, type ConnectionStatus } from './ControllerSocket';
 import { TouchSteering } from './TouchSteering';
+import { TiltSteering, checkTiltAvailability, requestTiltPermission } from './TiltSteering';
 import { WakeLock } from './WakeLock';
 
 const STATUS_STYLE: Record<ConnectionStatus, [string, string]> = {
@@ -55,6 +57,12 @@ export function initControllerUI(root: HTMLElement) {
   statusGroup.style.cssText = 'display:flex; align-items:center; gap:8px;';
   header.appendChild(statusGroup);
 
+  const modeToggle = document.createElement('button');
+  modeToggle.textContent = '🎮 TOUCH';
+  modeToggle.style.cssText =
+    'padding:4px 10px; border-radius:999px; font-size:11px; font-weight:700; border:none; background:#34495e; color:#fff;';
+  statusGroup.appendChild(modeToggle);
+
   const rttText = document.createElement('div');
   rttText.style.cssText = 'font-size:12px; opacity:0.7; font-variant-numeric:tabular-nums;';
   statusGroup.appendChild(rttText);
@@ -92,7 +100,8 @@ export function initControllerUI(root: HTMLElement) {
 
   // Thumb-corner layout: BRAKE bottom-left; DRIFT+GO stacked bottom-right (GO
   // largest, at the very corner where the right thumb naturally rests); the
-  // steering slider spans the full width above the button row.
+  // steering slider (or, in tilt mode, the wheel-arc visual) spans the full
+  // width above the button row.
   const playPanel = document.createElement('div');
   playPanel.style.cssText = 'display:none; flex-direction:column; flex:1; gap:16px; justify-content:flex-end;';
   wrapper.appendChild(playPanel);
@@ -100,6 +109,21 @@ export function initControllerUI(root: HTMLElement) {
   const sliderContainer = document.createElement('div');
   playPanel.appendChild(sliderContainer);
   const steering = new TouchSteering(sliderContainer);
+
+  const tiltSteering = new TiltSteering();
+  let steerMode: 'touch' | 'tilt' = 'touch';
+
+  const wheelContainer = document.createElement('div');
+  wheelContainer.style.cssText = 'display:none; align-items:center; justify-content:center; height:100px;';
+  playPanel.appendChild(wheelContainer);
+  const wheelDial = document.createElement('div');
+  wheelDial.style.cssText = 'width:90px; height:90px; border-radius:50%; border:8px solid #fff; position:relative;';
+  wheelContainer.appendChild(wheelDial);
+  const wheelSpoke = document.createElement('div');
+  wheelSpoke.style.cssText =
+    'position:absolute; top:2px; left:50%; width:4px; height:43px; background:#fff; ' +
+    'transform-origin:bottom center; transform:translateX(-50%);';
+  wheelDial.appendChild(wheelSpoke);
 
   const controlsRow = document.createElement('div');
   controlsRow.style.cssText = 'display:flex; justify-content:space-between; align-items:flex-end; gap:16px;';
@@ -115,6 +139,127 @@ export function initControllerUI(root: HTMLElement) {
   const driftBtn = makeHoldButton('DRIFT', '#8e44ad', 'width:140px; height:64px;');
   const throttleBtn = makeHoldButton('GO', '#27ae60', 'width:140px; height:96px; font-size:20px;');
   rightCluster.append(driftBtn.el, throttleBtn.el);
+
+  const recalibrateBtn = document.createElement('button');
+  recalibrateBtn.textContent = '⟳';
+  recalibrateBtn.style.cssText =
+    'display:none; position:absolute; top:52px; right:16px; width:40px; height:40px; border-radius:50%; ' +
+    'border:none; background:rgba(255,255,255,0.15); color:#fff; font-size:18px; z-index:5;';
+  root.appendChild(recalibrateBtn);
+
+  const toast = document.createElement('div');
+  toast.style.cssText =
+    'position:fixed; top:52px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.85); ' +
+    'color:#fff; padding:8px 16px; border-radius:8px; font-size:13px; display:none; z-index:30; ' +
+    'text-align:center; max-width:80%; white-space:nowrap;';
+  root.appendChild(toast);
+  let toastTimer: number | null = null;
+
+  function showToast(message: string, retry?: () => void) {
+    toast.innerHTML = '';
+    const text = document.createElement('span');
+    text.textContent = message;
+    toast.appendChild(text);
+    if (retry) {
+      const retryBtn = document.createElement('button');
+      retryBtn.textContent = '⚙ retry';
+      retryBtn.style.cssText =
+        'margin-left:10px; background:none; border:1px solid #fff; color:#fff; border-radius:6px; ' +
+        'padding:2px 8px; font-size:12px;';
+      retryBtn.addEventListener('click', retry);
+      toast.appendChild(retryBtn);
+    }
+    toast.style.display = 'block';
+    if (toastTimer !== null) window.clearTimeout(toastTimer);
+    if (!retry) toastTimer = window.setTimeout(() => (toast.style.display = 'none'), 3500);
+  }
+
+  const calibrationPanel = document.createElement('div');
+  calibrationPanel.style.cssText =
+    'position:fixed; inset:0; display:none; flex-direction:column; align-items:center; ' +
+    'justify-content:center; gap:24px; background:#0b0b0b; z-index:25; padding:0 32px; text-align:center;';
+  const calibrationText = document.createElement('div');
+  calibrationText.style.cssText = 'font-size:18px; line-height:1.5;';
+  calibrationText.innerHTML = 'Hold your phone like a steering wheel,<br>wheels straight → tap SET';
+  calibrationPanel.appendChild(calibrationText);
+  const levelBar = document.createElement('div');
+  levelBar.style.cssText = 'width:260px; height:16px; border-radius:8px; background:rgba(255,255,255,0.15); position:relative;';
+  calibrationPanel.appendChild(levelBar);
+  const levelDot = document.createElement('div');
+  levelDot.style.cssText =
+    'position:absolute; top:-4px; left:50%; width:24px; height:24px; border-radius:50%; ' +
+    'background:#2ecc71; transform:translateX(-50%);';
+  levelBar.appendChild(levelDot);
+  const setBtn = document.createElement('button');
+  setBtn.textContent = 'SET';
+  setBtn.style.cssText =
+    'font-size:20px; font-weight:800; padding:14px 48px; border-radius:16px; border:none; ' +
+    'background:#27ae60; color:#fff;';
+  calibrationPanel.appendChild(setBtn);
+  root.appendChild(calibrationPanel);
+
+  function switchToTouch() {
+    steerMode = 'touch';
+    tiltSteering.detach();
+    sliderContainer.style.display = 'block';
+    wheelContainer.style.display = 'none';
+    recalibrateBtn.style.display = 'none';
+    modeToggle.textContent = '🎮 TOUCH';
+  }
+
+  function switchToTilt() {
+    steerMode = 'tilt';
+    sliderContainer.style.display = 'none';
+    wheelContainer.style.display = 'flex';
+    recalibrateBtn.style.display = 'block';
+    modeToggle.textContent = '🎡 TILT';
+  }
+
+  function openCalibration() {
+    calibrationPanel.style.display = 'flex';
+  }
+
+  setBtn.addEventListener('click', () => {
+    tiltSteering.calibrate();
+    calibrationPanel.style.display = 'none';
+    switchToTilt();
+  });
+
+  // §3.7 availability gate: secure context -> API exists -> (iOS) permission
+  // granted from this tap handler. Any failure falls back to touch with a toast.
+  async function enableTilt() {
+    const availability = checkTiltAvailability();
+    if (availability !== 'available') {
+      showToast('Tilt unavailable — using touch.');
+      return;
+    }
+    const granted = await requestTiltPermission();
+    if (!granted) {
+      showToast('Tilt unavailable — using touch.', enableTilt);
+      return;
+    }
+    tiltSteering.attach();
+    openCalibration();
+  }
+
+  modeToggle.addEventListener('click', () => {
+    if (steerMode === 'touch') enableTilt();
+    else switchToTouch();
+  });
+  recalibrateBtn.addEventListener('click', openCalibration);
+
+  function tickVisuals() {
+    requestAnimationFrame(tickVisuals);
+    if (calibrationPanel.style.display === 'flex') {
+      const maxRad = (TUNING.tiltMaxAngleDeg * Math.PI) / 180;
+      const frac = Math.max(-1, Math.min(1, tiltSteering.filteredAngle / maxRad));
+      levelDot.style.left = `calc(50% + ${frac * 110}px)`;
+    }
+    if (steerMode === 'tilt') {
+      wheelSpoke.style.transform = `translateX(-50%) rotate(${tiltSteering.steer * 90}deg)`;
+    }
+  }
+  requestAnimationFrame(tickVisuals);
 
   const raceOverlay = document.createElement('div');
   raceOverlay.style.cssText =
@@ -216,11 +361,11 @@ export function initControllerUI(root: HTMLElement) {
     activeSocket = new ControllerSocket(
       code,
       () => ({
-        steer: steering.steer,
+        steer: steerMode === 'tilt' ? tiltSteering.steer : steering.steer,
         throttle: throttleBtn.active,
         brake: brakeBtn.active,
         drift: driftBtn.active,
-        steerMode: 'touch',
+        steerMode,
       }),
       {
         onStatus: (status) => {

@@ -1,9 +1,11 @@
 import express from 'express';
 import { createServer, type IncomingMessage } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { existsSync, readFileSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { WebSocket, WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer, type WebSocketServer as WSS } from 'ws';
 import {
   parseMessage,
   ROOM_CODE_CHARS,
@@ -14,6 +16,9 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8787;
+const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 8788;
+// Path C (cloudflared): overrides the joinUrl origin entirely, e.g. https://xyz.trycloudflare.com
+const PUBLIC_URL = process.env.PUBLIC_URL;
 
 const app = express();
 const distDir = path.resolve(__dirname, '..', 'dist');
@@ -22,6 +27,26 @@ app.get('/healthz', (_req, res) => res.send('ok'));
 
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/ws', perMessageDeflate: false });
+
+// Path B (mkcert): if certs/cert.pem + certs/key.pem exist, also serve
+// HTTPS/WSS on :8788 from the same express app and room registry, so an
+// iPhone can get a secure context for tilt steering without leaving the LAN.
+const CERTS_DIR = path.resolve(__dirname, '..', 'certs');
+const CERT_PATH = path.join(CERTS_DIR, 'cert.pem');
+const KEY_PATH = path.join(CERTS_DIR, 'key.pem');
+const hasCerts = existsSync(CERT_PATH) && existsSync(KEY_PATH);
+
+let wssHttps: WSS | null = null;
+if (hasCerts) {
+  const httpsServer = createHttpsServer(
+    { cert: readFileSync(CERT_PATH), key: readFileSync(KEY_PATH) },
+    app,
+  );
+  wssHttps = new WebSocketServer({ server: httpsServer, path: '/ws', perMessageDeflate: false });
+  httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
+    console.log(`[server] HTTPS listening on 0.0.0.0:${HTTPS_PORT}`);
+  });
+}
 
 interface Room {
   code: string;
@@ -82,7 +107,13 @@ function pagePortFromRequest(req: IncomingMessage): number {
 }
 
 function buildJoinUrl(req: IncomingMessage, code: string): string {
+  if (PUBLIC_URL) {
+    return `${PUBLIC_URL.replace(/\/+$/, '')}/controller.html?room=${code}`;
+  }
   const lanIp = getLanIPv4();
+  if (hasCerts) {
+    return `https://${lanIp}:${HTTPS_PORT}/controller.html?room=${code}`;
+  }
   const port = pagePortFromRequest(req);
   return `http://${lanIp}:${port}/controller.html?room=${code}`;
 }
@@ -92,7 +123,7 @@ function destroyRoom(room: Room) {
   rooms.delete(room.code);
 }
 
-wss.on('connection', (socket, req) => {
+function handleConnection(socket: WebSocket, req: IncomingMessage) {
   socket.on('message', (data) => {
     const msg = parseMessage(data.toString());
     if (!msg) return; // drop malformed / oversized
@@ -188,10 +219,15 @@ wss.on('connection', (socket, req) => {
       if (room.gameSocket) send(room.gameSocket, { type: 'peer', event: 'controller-left' });
     }
   });
-});
+}
+
+wss.on('connection', handleConnection);
+wssHttps?.on('connection', handleConnection);
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   const lanIp = getLanIPv4();
   console.log(`[server] listening on 0.0.0.0:${PORT}`);
   console.log(`[server] LAN URL: http://${lanIp}:${PORT}`);
+  if (hasCerts) console.log(`[server] HTTPS LAN URL: https://${lanIp}:${HTTPS_PORT}`);
+  if (PUBLIC_URL) console.log(`[server] PUBLIC_URL override: ${PUBLIC_URL}`);
 });
