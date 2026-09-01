@@ -22,6 +22,15 @@ export function wrapDelta(a: number, b: number, totalLength: number): number {
   return ((((a - b + totalLength / 2) % totalLength) + totalLength) % totalLength) - totalLength / 2;
 }
 
+// Nearest evenly-spaced sample to an arbitrary arc-length position (wraps).
+// Used by AiDriver for lookahead/curvature sampling (§3.4).
+export function sampleAtArcLength(samples: TrackSample[], totalLength: number, s: number): TrackSample {
+  const n = samples.length;
+  const wrapped = ((s % totalLength) + totalLength) % totalLength;
+  const idx = Math.round((wrapped / totalLength) * n) % n;
+  return samples[idx];
+}
+
 export class TrackQuery {
   private grid = new Map<string, number[]>();
   private allIndices: number[];

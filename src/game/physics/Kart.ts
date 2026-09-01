@@ -65,8 +65,16 @@ export function driftTier(charge: number): number {
 // §3.2 steps 1-2 and 4 (longitudinal, steering, integrate). Drift (step 3) and
 // spin-out (step 5) land in Phase 4 / Phase 10.
 // `offRoad` (from TrackQuery, |lateral| > ROAD_HALF) applies the grass speed cap;
-// boost overrides the cap so a mushroom powers through grass.
-export function stepKart(kart: KartState, control: ControlState, dt: number, offRoad = false) {
+// boost overrides the cap so a mushroom powers through grass. `topSpeedScale`
+// is AI rubber-banding/personality (§3.4 step 5) — applied only to the cruise
+// speed cap, never to accel/brake/off-road/boost physics constants.
+export function stepKart(
+  kart: KartState,
+  control: ControlState,
+  dt: number,
+  offRoad = false,
+  topSpeedScale = 1,
+) {
   const T = TUNING;
 
   // 1. Longitudinal
@@ -74,7 +82,7 @@ export function stepKart(kart: KartState, control: ControlState, dt: number, off
     kart.speed = moveToward(kart.speed, T.topSpeed * T.boostSpeedMult, T.boostAccel * dt);
     kart.boostTimer = Math.max(0, kart.boostTimer - dt);
   } else if (control.throttle) {
-    const target = T.topSpeed;
+    const target = T.topSpeed * topSpeedScale;
     const rate = kart.speed > target ? T.coastDecel : T.accel;
     kart.speed = moveToward(kart.speed, target, rate * dt);
   } else if (control.brake) {

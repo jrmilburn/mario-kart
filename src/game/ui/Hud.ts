@@ -15,6 +15,7 @@ export class Hud {
   private countdownEl: HTMLDivElement;
   private pausedOverlay: HTMLDivElement;
   private resultsPanel: HTMLDivElement;
+  private resultsList: HTMLDivElement;
 
   constructor(container: HTMLElement) {
     this.root = document.createElement('div');
@@ -93,10 +94,12 @@ export class Hud {
       'justify-content:center; gap:16px; background:rgba(0,0,0,0.6); font-size:32px; pointer-events:auto;';
     const resultsTitle = document.createElement('div');
     resultsTitle.textContent = '🏁 Race complete!';
+    this.resultsList = document.createElement('div');
+    this.resultsList.style.cssText = 'font-size:20px; display:flex; flex-direction:column; gap:6px;';
     const resultsHint = document.createElement('div');
     resultsHint.style.cssText = 'font-size:16px; opacity:0.8;';
     resultsHint.textContent = 'Press R or tap RESTART on your phone';
-    this.resultsPanel.append(resultsTitle, resultsHint);
+    this.resultsPanel.append(resultsTitle, this.resultsList, resultsHint);
     this.root.appendChild(this.resultsPanel);
   }
 
@@ -144,9 +147,11 @@ export class Hud {
     this.lobbyPanel.style.display = 'flex';
   }
 
-  setRaceInfo(lap: number, totalLaps: number, speedKmh: number) {
+  setRaceInfo(lap: number, totalLaps: number, speedKmh: number, position: number, totalKarts: number) {
     this.raceInfo.style.display = 'block';
-    this.raceInfo.textContent = `LAP ${Math.min(lap + 1, totalLaps)}/${totalLaps}   ${Math.round(speedKmh)} km/h`;
+    this.raceInfo.textContent =
+      `LAP ${Math.min(lap + 1, totalLaps)}/${totalLaps}   ` +
+      `POS ${position}/${totalKarts}   ${Math.round(speedKmh)} km/h`;
   }
 
   hideRaceInfo() {
@@ -166,8 +171,16 @@ export class Hud {
     this.pausedOverlay.style.display = paused ? 'flex' : 'none';
   }
 
-  showResults() {
+  // results: entries ordered by finish position (1st..last).
+  showResults(results: Array<{ name: string; isPlayer: boolean }>) {
     this.resultsPanel.style.display = 'flex';
+    this.resultsList.innerHTML = '';
+    results.forEach((r, i) => {
+      const row = document.createElement('div');
+      row.textContent = `${i + 1}. ${r.name}`;
+      if (r.isPlayer) row.style.fontWeight = '800';
+      this.resultsList.appendChild(row);
+    });
   }
 
   hideResults() {

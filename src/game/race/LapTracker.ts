@@ -13,13 +13,14 @@ export interface LapProgress {
   lastS: number;
   progress: number; // for positions + rubber-banding
   finished: boolean;
+  finishOrder: number | null; // set by the caller when `finished` first becomes true
 }
 
 // Kart starts sitting on checkpoint 0 (the finish line): the first thing it
 // must validate is checkpoint 1, so cutting straight across the infield can
 // never "complete a lap" without passing every gate in order.
 export function createLapProgress(startS: number): LapProgress {
-  return { lap: 0, nextCheckpoint: 1, lastS: startS, progress: 0, finished: false };
+  return { lap: 0, nextCheckpoint: 1, lastS: startS, progress: 0, finished: false, finishOrder: null };
 }
 
 export class LapTracker {

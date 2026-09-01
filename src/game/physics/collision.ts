@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { TUNING } from '../tuning';
 import { GRASS_HALF } from '../track/trackData';
 import type { TrackQuery } from '../track/TrackQuery';
@@ -6,6 +7,7 @@ import { kartForward, type KartState } from './Kart';
 
 const GLANCING_ANGLE_RAD = (10 * Math.PI) / 180;
 const HEADING_ALIGN_FRACTION = 0.6;
+const KART_KART_EXTRA_SEPARATION_MPS = 1.5; // "1.5 m/s position push" for side contact
 
 // §3.3 kart-vs-wall. Positional lateral-offset clamp (not a raycast) so it
 // cannot tunnel even at top speed. Call after Kart.stepKart has integrated
@@ -45,4 +47,47 @@ export function resolveWallCollision(kart: KartState, trackQuery: TrackQuery) {
   if (v.dot(tangentDir) < 0) tangentDir.negate();
   const tangentHeading = Math.atan2(tangentDir.x, tangentDir.z);
   kart.heading += angleWrap(tangentHeading - kart.heading) * HEADING_ALIGN_FRACTION;
+}
+
+// §3.3 kart-vs-kart. Positions only; heading is never touched (arcade karts
+// bump, they don't ragdoll). No drift cancel here — only walls cancel drift.
+export function resolveKartKartCollisions(karts: KartState[], dt: number) {
+  const T = TUNING;
+  const minDist = 2 * T.kartRadius;
+
+  for (let i = 0; i < karts.length; i++) {
+    for (let j = i + 1; j < karts.length; j++) {
+      const a = karts[i];
+      const b = karts[j];
+
+      const delta = new THREE.Vector3().subVectors(b.pos, a.pos);
+      delta.y = 0;
+      const dist = delta.length();
+      if (dist >= minDist) continue;
+
+      const normal = dist > 1e-6 ? delta.multiplyScalar(1 / dist) : new THREE.Vector3(1, 0, 0);
+      const penetration = minDist - dist;
+
+      // Separate along the center line by half the penetration each, plus a
+      // small continuous push so side contact visibly nudges both apart.
+      const separation = penetration / 2 + KART_KART_EXTRA_SEPARATION_MPS * dt;
+      a.pos.addScaledVector(normal, -separation);
+      b.pos.addScaledVector(normal, separation);
+
+      const va = kartForward(a.heading).multiplyScalar(a.speed);
+      const vb = kartForward(b.heading).multiplyScalar(b.speed);
+      const vaNormal = va.dot(normal);
+      const vbNormal = vb.dot(normal);
+
+      if (vaNormal - vbNormal <= 0) continue; // separating already, no impulse needed
+
+      // Exchange 50% of the normal component (equal masses): both end up at
+      // the average normal speed, i.e. a shunts b forward and slows itself.
+      const avgNormal = (vaNormal + vbNormal) / 2;
+      const newVa = va.clone().addScaledVector(normal, avgNormal - vaNormal);
+      const newVb = vb.clone().addScaledVector(normal, avgNormal - vbNormal);
+      a.speed = newVa.dot(kartForward(a.heading));
+      b.speed = newVb.dot(kartForward(b.heading));
+    }
+  }
 }
