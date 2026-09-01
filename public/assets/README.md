@@ -17,4 +17,9 @@ public/assets/characters/toad.glb
 public/assets/characters/bowser.glb
 ```
 
-Nothing else in this folder is read by the game yet.
+§Phase 4: the track's road/grass surfaces also check for optional real-image
+overrides, same fallback pattern as the characters above — drop in
+`public/assets/textures/asphalt.jpg` and/or `public/assets/textures/grass.jpg`
+to replace the built-in procedural CanvasTexture surfaces. Neither file is
+required; the game looks correct with zero textures dropped in (the default,
+shippable state).

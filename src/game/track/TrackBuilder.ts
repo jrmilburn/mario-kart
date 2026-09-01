@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { CONTROL_POINTS, ROAD_HALF, GRASS_HALF, CHECKPOINT_COUNT } from './trackData';
+import { buildAsphaltTexture, buildGrassTexture, tryLoadTextureOverride } from '../render/textures';
 
 export interface TrackSample {
   pos: THREE.Vector3;
@@ -19,6 +20,7 @@ const SAMPLE_COUNT = 400;
 const RAW_SAMPLE_COUNT = 2000;
 const STRIPE_WIDTH = 0.4;
 const WALL_HEIGHT = 1.2;
+const TEXTURE_V_SCALE = 8; // meters of arc length per texture repeat, longitudinally (§Phase 4 item 1)
 
 const UP = new THREE.Vector3(0, 1, 0);
 
@@ -65,28 +67,44 @@ function buildSamples(): { samples: TrackSample[]; totalLength: number } {
   return { samples, totalLength };
 }
 
-function buildRoadMesh(samples: TrackSample[]): THREE.Mesh {
+// u = cross-section position 0 (left edge) .. 1 (right edge); v = arc length / TEXTURE_V_SCALE.
+// The final cross-section ring is a *duplicate* of ring 0 (ringCount = n+1, not
+// n), placed at the same position but carrying v = totalLength/TEXTURE_V_SCALE
+// instead of wrapping back to v = 0 — otherwise the texture would visibly jump
+// at the start/finish seam. Index math below walks 0..n-1 -> i, i+1 with no
+// modulo, since the duplicate ring supplies the "+1" vertex for the last band.
+const U_EDGE_L = 0;
+const U_STRIPE_L = STRIPE_WIDTH / (2 * ROAD_HALF);
+const U_STRIPE_R = 1 - STRIPE_WIDTH / (2 * ROAD_HALF);
+const U_EDGE_R = 1;
+
+function buildRoadMesh(samples: TrackSample[], totalLength: number): THREE.Mesh {
   const n = samples.length;
+  const ringCount = n + 1;
   const positions: number[] = [];
   const colors: number[] = [];
+  const uvs: number[] = [];
   const indices: number[] = [];
 
   const stripeColor = new THREE.Color(0xf2f2f2);
   const lightGray = new THREE.Color(0x707070);
   const darkGray = new THREE.Color(0x5c5c5c);
 
-  // 4 cross-section vertices per sample: edgeL, stripeL, stripeR, edgeR.
-  for (let i = 0; i < n; i++) {
-    const { pos, right } = samples[i];
-    const roadColor = Math.floor(i / 4) % 2 === 0 ? lightGray : darkGray;
+  // 4 cross-section vertices per ring: edgeL, stripeL, stripeR, edgeR.
+  for (let i = 0; i < ringCount; i++) {
+    const sampleIdx = i % n;
+    const { pos, right } = samples[sampleIdx];
+    const sValue = i < n ? samples[sampleIdx].s : totalLength;
+    const v = sValue / TEXTURE_V_SCALE;
+    const roadColor = Math.floor(sampleIdx / 4) % 2 === 0 ? lightGray : darkGray;
 
     const edgeL = pos.clone().addScaledVector(right, -ROAD_HALF);
     const stripeL = pos.clone().addScaledVector(right, -(ROAD_HALF - STRIPE_WIDTH));
     const stripeR = pos.clone().addScaledVector(right, ROAD_HALF - STRIPE_WIDTH);
     const edgeR = pos.clone().addScaledVector(right, ROAD_HALF);
 
-    for (const v of [edgeL, stripeL, stripeR, edgeR]) {
-      positions.push(v.x, v.y + 0.001, v.z);
+    for (const vtx of [edgeL, stripeL, stripeR, edgeR]) {
+      positions.push(vtx.x, vtx.y + 0.001, vtx.z);
     }
     colors.push(
       stripeColor.r, stripeColor.g, stripeColor.b,
@@ -94,11 +112,12 @@ function buildRoadMesh(samples: TrackSample[]): THREE.Mesh {
       roadColor.r, roadColor.g, roadColor.b,
       stripeColor.r, stripeColor.g, stripeColor.b,
     );
+    uvs.push(U_EDGE_L, v, U_STRIPE_L, v, U_STRIPE_R, v, U_EDGE_R, v);
   }
 
   for (let i = 0; i < n; i++) {
     const a = i * 4;
-    const b = ((i + 1) % n) * 4;
+    const b = (i + 1) * 4; // ringCount = n+1, so i+1 is always in range without wrapping
     // 3 quads (6 indices each) between cross-section i and i+1: left stripe, road, right stripe
     for (let band = 0; band < 3; band++) {
       const a0 = a + band;
@@ -112,23 +131,38 @@ function buildRoadMesh(samples: TrackSample[]): THREE.Mesh {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
-  return new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  const material = new THREE.MeshLambertMaterial({ vertexColors: true, map: buildAsphaltTexture() });
+  tryLoadTextureOverride('/assets/textures/asphalt.jpg', material);
+  return new THREE.Mesh(geometry, material);
 }
 
-function buildGrassMesh(samples: TrackSample[]): THREE.Mesh {
+// u spans the full -GRASS_HALF..GRASS_HALF cross-section (both ribbons share
+// one texture tile); see buildRoadMesh's comment for the duplicated-ring seam fix.
+const U_OUTER_L = 0;
+const U_INNER_L = (GRASS_HALF - ROAD_HALF) / (2 * GRASS_HALF);
+const U_INNER_R = 1 - (GRASS_HALF - ROAD_HALF) / (2 * GRASS_HALF);
+const U_OUTER_R = 1;
+
+function buildGrassMesh(samples: TrackSample[], totalLength: number): THREE.Mesh {
   const n = samples.length;
+  const ringCount = n + 1;
   const positions: number[] = [];
   const colors: number[] = [];
+  const uvs: number[] = [];
   const indices: number[] = [];
 
   const baseGreen = new THREE.Color(0x5cb85c);
 
-  // Two ribbons (left ROAD_HALF..GRASS_HALF, right ROAD_HALF..GRASS_HALF), 2 verts each per sample.
-  for (let i = 0; i < n; i++) {
-    const { pos, right } = samples[i];
+  // Two ribbons (left ROAD_HALF..GRASS_HALF, right ROAD_HALF..GRASS_HALF), 4 verts per ring.
+  for (let i = 0; i < ringCount; i++) {
+    const sampleIdx = i % n;
+    const { pos, right } = samples[sampleIdx];
+    const sValue = i < n ? samples[sampleIdx].s : totalLength;
+    const v = sValue / TEXTURE_V_SCALE;
     const jitter = () => 0.9 + Math.random() * 0.2;
 
     const innerL = pos.clone().addScaledVector(right, -ROAD_HALF);
@@ -136,18 +170,19 @@ function buildGrassMesh(samples: TrackSample[]): THREE.Mesh {
     const innerR = pos.clone().addScaledVector(right, ROAD_HALF);
     const outerR = pos.clone().addScaledVector(right, GRASS_HALF);
 
-    for (const v of [outerL, innerL, innerR, outerR]) {
-      positions.push(v.x, v.y, v.z);
+    for (const vtx of [outerL, innerL, innerR, outerR]) {
+      positions.push(vtx.x, vtx.y, vtx.z);
     }
     for (let k = 0; k < 4; k++) {
       const j = jitter();
       colors.push(baseGreen.r * j, baseGreen.g * j, baseGreen.b * j);
     }
+    uvs.push(U_OUTER_L, v, U_INNER_L, v, U_INNER_R, v, U_OUTER_R, v);
   }
 
   for (let i = 0; i < n; i++) {
     const a = i * 4;
-    const b = ((i + 1) % n) * 4;
+    const b = (i + 1) * 4; // ringCount = n+1, so i+1 is always in range without wrapping
     // left band: outerL(0)-innerL(1), right band: innerR(2)-outerR(3)
     for (const band of [0, 2]) {
       const a0 = a + band;
@@ -161,10 +196,13 @@ function buildGrassMesh(samples: TrackSample[]): THREE.Mesh {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
-  return new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  const material = new THREE.MeshLambertMaterial({ vertexColors: true, map: buildGrassTexture() });
+  tryLoadTextureOverride('/assets/textures/grass.jpg', material);
+  return new THREE.Mesh(geometry, material);
 }
 
 function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
@@ -348,8 +386,8 @@ export function buildTrack(): TrackData {
   }
 
   const group = new THREE.Group();
-  group.add(buildRoadMesh(samples));
-  group.add(buildGrassMesh(samples));
+  group.add(buildRoadMesh(samples, totalLength));
+  group.add(buildGrassMesh(samples, totalLength));
   group.add(buildWallMeshes(samples));
   group.add(buildStartFinish(samples[checkpoints[0]]));
   group.add(buildTracksideProps(samples));
