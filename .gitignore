@@ -3,3 +3,9 @@ dist/
 certs/
 .DS_Store
 *.log
+
+# Phase 3: user-supplied character GLBs (personal/local use only — see
+# README.md "Character models"). public/assets/README.md stays tracked so
+# the folder's purpose is documented even with zero models present.
+public/assets/**
+!public/assets/README.md

@@ -13,12 +13,16 @@ import {
   buildGround,
   buildLights,
   buildKart,
+  setDriver,
+  setKartColor,
   updateKartVisual,
   buildItemBoxMesh,
   buildBananaMesh,
   buildShellMesh,
   type KartVisual,
 } from './render/SceneBuilder';
+import { CHARACTERS, CHARACTERS_BY_ID, type CharacterDef } from './characters/registry';
+import { loadCharacterModelInstance, preloadAll } from './characters/CharacterLoader';
 import { buildTrack } from './track/TrackBuilder';
 import { TrackQuery, sampleAtArcLength } from './track/TrackQuery';
 import { GRASS_HALF, ROAD_HALF } from './track/trackData';
@@ -64,6 +68,12 @@ interface KartEntity {
   // independent cooldown/edge tracking instead of one pair of module-scope vars).
   collisionHapticCooldown: number;
   prevBoostTimer: number;
+  // §Phase 3: which character this entity currently shows. `driverRequestId`
+  // guards the async model load in loadDriverFor — bumped on every
+  // applyCharacterToEntity call so a slow-resolving load for a character this
+  // entity no longer shows can't clobber a newer selection.
+  characterId: string;
+  driverRequestId: number;
 }
 
 const app = document.getElementById('app')!;
@@ -89,13 +99,16 @@ const trackQuery = new TrackQuery(track.samples, track.totalLength);
 // P1/P2 side by side at the line, then two rows of two AI further back.
 // `humanSlot` marks entities 0-1 as human-capable; entity 1 falls back to AI
 // whenever P2 isn't active (roster locked at countdown, see lockRoster below).
-const GRID: { name: string; color: number; s: number; lane: number; humanSlot?: PlayerSlot }[] = [
-  { name: 'P1', color: 0xff6b35, s: 0, lane: -1.2, humanSlot: 0 },
-  { name: 'P2', color: 0x3498db, s: 0, lane: 1.2, humanSlot: 1 },
-  { name: 'AI 1', color: 0x2ecc71, s: -4, lane: -2 },
-  { name: 'AI 2', color: 0xf1c40f, s: -4, lane: 0.7 },
-  { name: 'AI 3', color: 0x9b59b6, s: -8, lane: 2 },
-  { name: 'AI 4', color: 0xe74c3c, s: -8, lane: -0.7 },
+// `charIndex` is the default CHARACTERS[] slot (§Phase 3: P1=mario, P2=luigi,
+// AI get the rest) — overridden live by character-select picks / the
+// countdown AI reassignment in lockRoster.
+const GRID: { name: string; charIndex: number; s: number; lane: number; humanSlot?: PlayerSlot }[] = [
+  { name: 'P1', charIndex: 0, s: 0, lane: -1.2, humanSlot: 0 },
+  { name: 'P2', charIndex: 1, s: 0, lane: 1.2, humanSlot: 1 },
+  { name: 'AI 1', charIndex: 2, s: -4, lane: -2 },
+  { name: 'AI 2', charIndex: 3, s: -4, lane: 0.7 },
+  { name: 'AI 3', charIndex: 4, s: -8, lane: 2 },
+  { name: 'AI 4', charIndex: 5, s: -8, lane: -0.7 },
 ];
 
 function spawnPose(sOffset: number, lane: number): { pos: THREE.Vector3; heading: number } {
@@ -105,26 +118,64 @@ function spawnPose(sOffset: number, lane: number): { pos: THREE.Vector3; heading
   return { pos, heading };
 }
 
+// §Phase 3: kicks off every character's GLB load up front, non-blocking —
+// karts already render with their procedural fallback (buildKart seeds it
+// synchronously), models swap in whenever each one resolves.
+preloadAll(CHARACTERS);
+
+function characterColorHex(def: CharacterDef): string {
+  return `#${def.kartColor.toString(16).padStart(6, '0')}`;
+}
+
+// Kicks off (or re-kicks-off) the async model load for whatever character
+// `entity` currently shows. `driverRequestId` guards against a stale,
+// slow-resolving load clobbering a newer selection made before this one finished.
+function loadDriverFor(entity: KartEntity, def: CharacterDef) {
+  const requestId = ++entity.driverRequestId;
+  loadCharacterModelInstance(def).then((model) => {
+    if (entity.driverRequestId !== requestId || !model) return;
+    setDriver(entity.visual, def, model);
+  });
+}
+
+// Rebuilds one entity's driver + kart color + display name for a new
+// character (initial assignment, a select pick, or the countdown AI
+// reassignment in lockRoster) — always seeds the fallback immediately, then
+// kicks off the real model load in the background.
+function applyCharacterToEntity(entity: KartEntity, def: CharacterDef) {
+  entity.characterId = def.id;
+  entity.name = def.name;
+  entity.colorHex = characterColorHex(def);
+  setKartColor(entity.visual, def.kartColor);
+  setDriver(entity.visual, def, null);
+  loadDriverFor(entity, def);
+}
+
 const entities: KartEntity[] = GRID.map((g, i) => {
+  const def = CHARACTERS[g.charIndex];
   const { pos, heading } = spawnPose(g.s, g.lane);
   const isAi = g.humanSlot === undefined;
   const kart = createKart(pos, heading, isAi);
-  const visual = buildKart(g.color);
+  const visual = buildKart(def); // seeds body color + fallback driver synchronously
   scene.add(visual.group, visual.shadow);
-  return {
+  const entity: KartEntity = {
     kart,
     visual,
     lapProgress: createLapProgress(0),
     ai: i === 0 ? null : createAiState(g.lane), // entity 0 (P1) is never AI; entity 1 carries a fallback AiState
-    name: g.name,
+    name: def.name,
     spawnS: g.s,
     spawnLane: g.lane,
     itemState: createHeldItemState(),
     prevItemInput: 0 as const,
-    colorHex: `#${g.color.toString(16).padStart(6, '0')}`,
+    colorHex: characterColorHex(def),
     collisionHapticCooldown: 0,
     prevBoostTimer: 0,
+    characterId: def.id,
+    driverRequestId: 0,
   };
+  loadDriverFor(entity, def);
+  return entity;
 });
 const player = entities[0]; // P1's entity — shorthand kept for the shared/engine-audio bits that stay P1-only
 
@@ -165,9 +216,23 @@ function staleActiveSlots(now: number): PlayerSlot[] {
 // Roster locks at the moment countdown begins (Phase 2b): P2 drives entity 1
 // for this race iff it's connected or driving via keyboard right now;
 // otherwise entity 1 runs as AI for the whole race, even if P2 joins mid-race.
+// §Phase 3: also hands out characters to every AI-driven entity at this same
+// moment — whatever the active humans aren't currently showing, in
+// CHARACTERS[] order, assigned to AI entities in ascending index order.
+// Recomputed fresh every countdown since lobby picks can change race to race.
 function lockRoster() {
   const now = performance.now();
   players[1].active = players[1].connected || players[1].inputSource.isKeyboardActive(now);
+
+  const usedIds = new Set(players.filter((p) => p.active).map((p) => entityFor(p).characterId));
+  const remaining = CHARACTERS.filter((c) => !usedIds.has(c.id));
+  const humanEntityIndices = new Set(players.filter((p) => p.active).map((p) => p.entityIndex));
+  let next = 0;
+  entities.forEach((entity, i) => {
+    if (humanEntityIndices.has(i)) return;
+    const def = remaining[next++];
+    if (def && entity.characterId !== def.id) applyCharacterToEntity(entity, def);
+  });
 }
 
 // Split-screen (Phase 2c) mirrors the roster lock exactly: two active

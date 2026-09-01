@@ -1,13 +1,19 @@
 import * as THREE from 'three';
 import { damp } from '../../shared/mathUtils';
 import type { KartState } from '../physics/Kart';
+import type { CharacterDef, CharacterFallbackColors } from '../characters/registry';
 
 export interface KartVisual {
-  group: THREE.Group; // body+wheels+head; position/rotation driven by physics
+  group: THREE.Group; // body+wheels+driverAnchor; position/rotation driven by physics
   body: THREE.Mesh; // gets the drift-lean roll
   frontWheelPivots: THREE.Group[]; // steer-yawed independently of body lean
   shadow: THREE.Mesh; // flat blob shadow; position-only follow, never rotates
   leanAngle: number; // smoothed drift-lean state, mutated by updateKartVisual
+  // §Phase 3: seat anchor for the driver (GLTF model or procedural fallback).
+  // Parented under `body` (not `group`) so it inherits the existing drift-lean
+  // roll (visual.body.rotation.z, set in updateKartVisual) for free — the
+  // driver leans into drifts along with the kart body with no extra per-frame code.
+  driverAnchor: THREE.Group;
 }
 
 // One large flat plane beneath everything (§3.1) for far-field coverage beyond
@@ -31,22 +37,26 @@ export function buildLights(scene: THREE.Scene) {
 }
 
 // Kart's local "nose" points toward +Z (matches physics/Kart.ts kartForward()).
-export function buildKart(bodyColor: number): KartVisual {
+// §Phase 3: takes a CharacterDef instead of a bare color — the kart body is
+// tinted from `def.kartColor` and the seat starts populated with `def`'s
+// procedural fallback driver (setDriver swaps in the real GLTF model later,
+// once/if it loads).
+export function buildKart(def: CharacterDef): KartVisual {
   const group = new THREE.Group();
 
   const body = new THREE.Mesh(
     new THREE.BoxGeometry(1.2, 0.5, 2.2),
-    new THREE.MeshLambertMaterial({ color: bodyColor }),
+    new THREE.MeshLambertMaterial({ color: def.kartColor }),
   );
   body.position.y = 0.5;
   group.add(body);
 
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.32, 12, 10),
-    new THREE.MeshLambertMaterial({ color: 0xffe0bd }),
-  );
-  head.position.set(0, 0.95, -0.3);
-  group.add(head);
+  // Seat anchor: ~(0, 0.75, -0.3) in kart-floor space, expressed here relative
+  // to `body`'s own origin (which already sits at y=0.5) since driverAnchor is
+  // parented under `body` (see KartVisual.driverAnchor).
+  const driverAnchor = new THREE.Group();
+  driverAnchor.position.set(0, 0.25, -0.3);
+  body.add(driverAnchor);
 
   const wheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.28, 12);
   const wheelMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
@@ -80,7 +90,65 @@ export function buildKart(bodyColor: number): KartVisual {
   shadow.rotation.x = -Math.PI / 2;
   shadow.position.y = 0.02;
 
-  return { group, body, frontWheelPivots, shadow, leanAngle: 0 };
+  const visual: KartVisual = { group, body, frontWheelPivots, shadow, leanAngle: 0, driverAnchor };
+  setDriver(visual, def, null); // seed the fallback immediately; caller swaps in the real model once loaded
+  return visual;
+}
+
+// §Phase 3: sets (or clears) the driver mounted on `visual.driverAnchor` — the
+// scaled/offset/rotated GLTF scene when `model` is provided, otherwise an
+// improved procedural fallback built from `def.fallbackColors`. Safe to call
+// repeatedly (e.g. on character re-select, or when a model finishes loading
+// after the fallback was already showing): always clears whatever was mounted first.
+export function setDriver(visual: KartVisual, def: CharacterDef, model: THREE.Object3D | null) {
+  const anchor = visual.driverAnchor;
+  while (anchor.children.length > 0) anchor.remove(anchor.children[0]);
+
+  if (model) {
+    model.scale.setScalar(def.scale);
+    model.position.set(0, def.yOffset, 0);
+    model.rotation.y = def.rotationY;
+    anchor.add(model);
+  } else {
+    anchor.add(buildFallbackDriver(def.fallbackColors));
+  }
+}
+
+// Sets just the kart body's tint — used when a player swaps characters so the
+// kart color updates immediately without rebuilding the whole KartVisual.
+export function setKartColor(visual: KartVisual, color: number) {
+  (visual.body.material as THREE.MeshLambertMaterial).color.setHex(color);
+}
+
+// Head sphere + torso box + a simple domed cap, sized/positioned relative to
+// the driverAnchor origin (the seat) — deliberately more distinct than the
+// old lone floating head sphere so each character reads differently even
+// with zero GLB files present (the default, shippable state).
+function buildFallbackDriver(colors: CharacterFallbackColors): THREE.Group {
+  const driver = new THREE.Group();
+
+  const torso = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.5, 0.4),
+    new THREE.MeshLambertMaterial({ color: colors.primary }),
+  );
+  torso.position.y = 0.25;
+  driver.add(torso);
+
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.28, 12, 10),
+    new THREE.MeshLambertMaterial({ color: colors.skin }),
+  );
+  head.position.y = 0.68;
+  driver.add(head);
+
+  const cap = new THREE.Mesh(
+    new THREE.SphereGeometry(0.3, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+    new THREE.MeshLambertMaterial({ color: colors.secondary }),
+  );
+  cap.position.y = 0.74;
+  driver.add(cap);
+
+  return driver;
 }
 
 const LEAN_BLEND_RATE = 1 / 0.15; // blend the drift lean in/out over ~0.15s
