@@ -8,9 +8,12 @@ import { buildGrassTexture } from './textures';
 // once at scene setup; returns the pieces main.ts might want a handle to
 // (currently just the ground, for parity with the old buildGround signature).
 
-const SKY_RADIUS = 450;
-const MOUNTAIN_RING_RADIUS = 260;
-const GROUND_SIZE = 1000;
+const SKY_RADIUS = 600;
+// §Phase 4 item 5: the new ~1001m layout's hairpin reaches ~275m from the
+// origin (plus grass/prop halo), so the ring needs more headroom than the
+// old ~620m track required to stay a clearly-distant backdrop.
+const MOUNTAIN_RING_RADIUS = 400;
+const GROUND_SIZE = 1400;
 const GROUND_TEXTURE_TILE_METERS = 12;
 
 const SKY_TOP = new THREE.Color(0x2f7fd6);

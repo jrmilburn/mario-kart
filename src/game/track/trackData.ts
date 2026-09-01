@@ -1,28 +1,36 @@
 import * as THREE from 'three';
 
-// Hand-authored closed circuit (§3.1). One long straight (~113m) with the
-// start/finish, two sweepers, a chicane, and a hairpin, forming a clean
-// non-self-intersecting ~620m loop (verified: >50m clearance between any
-// two non-adjacent sections of track).
+// Hand-authored closed circuit (§3.1, redesigned §Phase 4 item 5). Start/finish
+// straight, a double-apex right-hander, a flowing esses, a long back
+// straight (~181m, clearly the longest single straight), and a two-part
+// hairpin complex back to the line — a clean non-self-intersecting ~1001m
+// loop (verified via a throwaway arc-length clearance script: no two of the
+// 600 rendered samples more than 40m apart along the track are ever closer
+// than 2*GRASS_HALF+2 = 30m in x/z; worst case ~33.7m).
 export const CONTROL_POINTS: THREE.Vector3[] = [
   new THREE.Vector3(0, 0, 0), // 0 start/finish
-  new THREE.Vector3(0, 0, 113), // 1 end of long straight
-  new THREE.Vector3(12.6, 0, 146.5), // 2 sweeper 1 entry
-  new THREE.Vector3(46, 0, 152.4), // 3 sweeper 1 apex
-  new THREE.Vector3(82, 0, 127.2), // 4 sweeper 2
-  new THREE.Vector3(87.9, 0, 82), // 5 enter back straight
-  new THREE.Vector3(75.3, 0, 41.9), // 6 back straight, before chicane
-  new THREE.Vector3(52.7, 0, 23.4), // 7 chicane kink 1
-  new THREE.Vector3(73.7, 0, 5), // 8 chicane kink 2
-  new THREE.Vector3(73.7, 0, -33.5), // 9 back straight continues, entering hairpin zone
-  new THREE.Vector3(48.6, 0, -71.2), // 10 hairpin entry
-  new THREE.Vector3(10, 0, -82), // 11 hairpin apex
-  new THREE.Vector3(-31.8, 0, -56.9), // 12 hairpin exit, heading back toward start
+  new THREE.Vector3(0, 0, 101.84), // 1 end of long start straight
+  new THREE.Vector3(9.32, 0, 127.31), // 2 double-apex turn-in
+  new THREE.Vector3(36.02, 0, 142.83), // 3 double-apex, apex 1
+  new THREE.Vector3(62.1, 0, 136.62), // 4 double-apex, easing between apexes
+  new THREE.Vector3(91.91, 0, 145.94), // 5 double-apex, apex 2
+  new THREE.Vector3(116.75, 0, 124.2), // 6 double-apex exit
+  new THREE.Vector3(96.26, 0, 86.94), // 7 connecting curve into the esses
+  new THREE.Vector3(82.8, 0, 62.1), // 8 esses entry
+  new THREE.Vector3(62.93, 0, 28.98), // 9 esses kink 1
+  new THREE.Vector3(87.77, 0, -4.14), // 10 esses kink 2
+  new THREE.Vector3(80.32, 0, -45.54), // 11 esses exit, entering the back straight
+  new THREE.Vector3(80.24, 0, -225.9), // 12 long back straight
+  new THREE.Vector3(55.04, 0, -261.9), // 13 braking zone into the hairpin
+  new THREE.Vector3(15.44, 0, -272.7), // 14 hairpin apex
+  new THREE.Vector3(-15.3, 0, -198), // 15 hairpin exit
+  new THREE.Vector3(-22.2, 0, -149), // 16 sweeping back toward the start
+  new THREE.Vector3(-4.93, 0, -88.56), // 17 final approach, merging onto the start straight
 ];
 
 export const ROAD_HALF = 6;
 export const GRASS_HALF = 14;
-export const CHECKPOINT_COUNT = 12;
+export const CHECKPOINT_COUNT = 16;
 
 // §Phase 4 item 4. `sStart`/`sEnd` are arc-length positions in meters
 // (wrap-aware: sStart > sEnd means the zone spans across the start/finish
@@ -39,13 +47,14 @@ export interface SurfaceZone {
   latMax?: number;
 }
 
-// Three boost pads on the racing line (end of the long straight, mid back
-// straight, exit of the chicane straight) plus one sand trap punishing a
-// tight inside cut through the hairpin apex. Authored against the current
-// ~620m layout; re-placed against the new ~900m layout in §Phase 4 item 5.
+// Three boost pads on the racing line (mid start-straight, mid back-straight,
+// on the straightaway just past the hairpin exit) plus one sand trap
+// punishing a tight inside cut through the hairpin apex (s=717.5). Re-placed
+// here for the §Phase 4 item 5 layout (was authored against the old ~620m
+// layout in §Phase 4 item 4).
 export const SURFACE_ZONES: SurfaceZone[] = [
-  { sStart: 95, sEnd: 105, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
-  { sStart: 288, sEnd: 298, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
-  { sStart: 430, sEnd: 440, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
-  { sStart: 493, sEnd: 515, type: 'sand', latMin: ROAD_HALF, latMax: GRASS_HALF - 1 },
+  { sStart: 55, sEnd: 65, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
+  { sStart: 515, sEnd: 528, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
+  { sStart: 815, sEnd: 828, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
+  { sStart: 705, sEnd: 725, type: 'sand', latMin: ROAD_HALF, latMax: GRASS_HALF - 1 },
 ];

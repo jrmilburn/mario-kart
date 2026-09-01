@@ -19,7 +19,7 @@ export interface TrackData {
   group: THREE.Group;
 }
 
-const SAMPLE_COUNT = 400;
+const SAMPLE_COUNT = 600; // §Phase 4 item 5: ~1001m / 600 samples =~ 1.67m spacing
 const RAW_SAMPLE_COUNT = 2000;
 const STRIPE_WIDTH = 0.4;
 const WALL_HEIGHT = 1.2;
@@ -318,9 +318,10 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   const n = samples.length;
   const isNearStart = (i: number) => Math.min(i, n - i) < START_CLEARANCE_SAMPLES;
 
-  // Trees: trunk + cone top, alternating sides, every ~23m.
+  // Trees: trunk + cone top, alternating sides, every ~23m. Stride retuned
+  // for the §Phase 4 item 5 layout's ~1.67m sample spacing (was ~1.55m/sample).
   const treeIndices: number[] = [];
-  for (let i = 0; i < n; i += 15) if (!isNearStart(i)) treeIndices.push(i);
+  for (let i = 0; i < n; i += 14) if (!isNearStart(i)) treeIndices.push(i);
 
   const trunkGeo = new THREE.CylinderGeometry(0.15, 0.2, 1.2, 6);
   const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4423 });
@@ -347,9 +348,10 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   topMesh.instanceMatrix.needsUpdate = true;
   group.add(trunkMesh, topMesh);
 
-  // Cones: single-piece, closer to the road, every ~15.5m.
+  // Cones: single-piece, closer to the road, every ~15m. Stride retuned for
+  // the §Phase 4 item 5 layout's ~1.67m sample spacing.
   const coneIndices: number[] = [];
-  for (let i = 0; i < n; i += 10) if (!isNearStart(i)) coneIndices.push(i);
+  for (let i = 0; i < n; i += 9) if (!isNearStart(i)) coneIndices.push(i);
 
   const coneGeo = new THREE.ConeGeometry(0.4, 1.0, 8);
   const coneMat = new THREE.MeshLambertMaterial({ color: 0xff7f11 });
@@ -364,9 +366,10 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   coneMesh.instanceMatrix.needsUpdate = true;
   group.add(coneMesh);
 
-  // Floating ring gates: centered on the road, spanning it like a hoop, every ~78m.
+  // Floating ring gates: centered on the road, spanning it like a hoop, every
+  // ~77m. Stride retuned for the §Phase 4 item 5 layout's ~1.67m sample spacing.
   const ringIndices: number[] = [];
-  for (let i = 0; i < n; i += 50) ringIndices.push(i);
+  for (let i = 0; i < n; i += 46) ringIndices.push(i);
 
   const ringGeo = new THREE.TorusGeometry(2.2, 0.22, 8, 16);
   const ringMat = new THREE.MeshLambertMaterial({ color: 0xffd23f });
@@ -492,6 +495,140 @@ function buildSurfaceZoneVisuals(samples: TrackSample[], totalLength: number): T
   return group;
 }
 
+// §Phase 4 item 6: a handful of hand-placed set-pieces (grandstands, an arch
+// banner, warp-pipe-style cylinders), positioned by (s, lateral) via
+// sampleAtArcLength so they follow the curve regardless of layout changes.
+// Purely decorative — no collision, no gameplay effect.
+
+function buildAwningTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 8;
+  const ctx = canvas.getContext('2d')!;
+  const stripes = 8;
+  const stripeWidth = canvas.width / stripes;
+  for (let i = 0; i < stripes; i++) {
+    ctx.fillStyle = i % 2 === 0 ? '#e6483c' : '#f5f5f5';
+    ctx.fillRect(i * stripeWidth, 0, stripeWidth, canvas.height);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.repeat.set(3, 1);
+  return texture;
+}
+
+function buildGrandstand(): THREE.Group {
+  const group = new THREE.Group();
+  const base = new THREE.Mesh(
+    new THREE.BoxGeometry(10, 3.4, 5),
+    new THREE.MeshLambertMaterial({ color: 0x9aa3ad }),
+  );
+  base.position.y = 1.7;
+  group.add(base);
+
+  const awning = new THREE.Mesh(
+    new THREE.BoxGeometry(11, 0.35, 5.6),
+    new THREE.MeshLambertMaterial({ map: buildAwningTexture() }),
+  );
+  awning.position.y = 3.7;
+  group.add(awning);
+
+  return group;
+}
+
+// Generic celebratory checker/star pattern — deliberately no wordmarks or
+// character likenesses (see README's IP note re: fan-made character assets).
+function buildBannerTexture(): THREE.CanvasTexture {
+  const w = 256;
+  const h = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  const gradient = ctx.createLinearGradient(0, 0, w, 0);
+  gradient.addColorStop(0, '#ffd23f');
+  gradient.addColorStop(0.5, '#ff7f11');
+  gradient.addColorStop(1, '#ffd23f');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, w, h);
+  const cell = 16;
+  ctx.fillStyle = 'rgba(28,28,28,0.85)';
+  for (let y = 0; y < h; y += cell) {
+    for (let x = 0; x < w; x += cell) {
+      if (((x / cell) + (y / cell)) % 2 === 0) ctx.fillRect(x, y, cell, cell);
+    }
+  }
+  return new THREE.CanvasTexture(canvas);
+}
+
+function buildArchBanner(): THREE.Group {
+  const group = new THREE.Group();
+  const pillarGeo = new THREE.BoxGeometry(0.7, 6, 0.7);
+  const pillarMat = new THREE.MeshLambertMaterial({ color: 0x2f3b4c });
+
+  const left = new THREE.Mesh(pillarGeo, pillarMat);
+  left.position.set(-(GRASS_HALF + 0.5), 3, 0);
+  group.add(left);
+
+  const right = new THREE.Mesh(pillarGeo, pillarMat);
+  right.position.set(GRASS_HALF + 0.5, 3, 0);
+  group.add(right);
+
+  const banner = new THREE.Mesh(
+    new THREE.PlaneGeometry(GRASS_HALF * 2 + 2, 1.6),
+    new THREE.MeshLambertMaterial({ map: buildBannerTexture(), side: THREE.DoubleSide }),
+  );
+  banner.position.set(0, 5.4, 0);
+  group.add(banner);
+
+  return group;
+}
+
+function buildWarpPipe(): THREE.Group {
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.1, 1.1, 3.2, 16),
+    new THREE.MeshLambertMaterial({ color: 0x2f9e44 }),
+  );
+  body.position.y = 1.6;
+  group.add(body);
+
+  const rim = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.4, 1.4, 0.6, 16),
+    new THREE.MeshLambertMaterial({ color: 0x1f7a33 }),
+  );
+  rim.position.y = 3.5;
+  group.add(rim);
+
+  return group;
+}
+
+function buildSetPieces(samples: TrackSample[], totalLength: number): THREE.Group {
+  const group = new THREE.Group();
+
+  function placeAt(obj: THREE.Object3D, s: number, lateral: number, extraYaw = 0) {
+    const sample = sampleAtArcLength(samples, totalLength, s);
+    obj.position.copy(sample.pos).addScaledVector(sample.right, lateral);
+    obj.rotation.y = Math.atan2(sample.forward.x, sample.forward.z) + extraYaw;
+    group.add(obj);
+  }
+
+  // Grandstands: one on the start straight, one facing the long back
+  // straight, both set back beyond the grass, facing in toward the road.
+  placeAt(buildGrandstand(), 40, GRASS_HALF + 9, -Math.PI / 2);
+  placeAt(buildGrandstand(), 540, -(GRASS_HALF + 9), Math.PI / 2);
+
+  // Arch banner spanning the road partway around the esses/back-straight transition.
+  placeAt(buildArchBanner(), 470, 0);
+
+  // Warp-pipe clusters flanking the double-apex and the hairpin.
+  placeAt(buildWarpPipe(), 165, GRASS_HALF + 4);
+  placeAt(buildWarpPipe(), 178, GRASS_HALF + 7);
+  placeAt(buildWarpPipe(), 752, -(GRASS_HALF + 4));
+
+  return group;
+}
+
 export function buildTrack(): TrackData {
   const { samples, totalLength } = buildSamples();
 
@@ -507,6 +644,7 @@ export function buildTrack(): TrackData {
   group.add(buildStartFinish(samples[checkpoints[0]]));
   group.add(buildTracksideProps(samples));
   group.add(buildSurfaceZoneVisuals(samples, totalLength));
+  group.add(buildSetPieces(samples, totalLength));
 
   return { samples, totalLength, checkpoints, group };
 }
