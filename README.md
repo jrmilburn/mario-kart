@@ -151,3 +151,18 @@ Run `node --import tsx --test scripts/items.test.ts` for item behavior and geome
 checks. Run `node --import tsx --test scripts/rainbow.test.ts` for track geometry
 and three-lap AI simulations. Preview each map with `?mode=single&map=rainbow` or
 `?mode=single&map=circuit` on the dev server.
+
+
+### Railway controller QR codes
+
+The server automatically uses `RAILWAY_PUBLIC_DOMAIN` for HTTPS controller links.
+Other HTTPS hosts can use the game page's WebSocket Origin. `PUBLIC_URL` remains
+an explicit override for custom domains and Cloudflare tunnels.
+
+If a QR code opens an internal IP address or an expired tunnel, set Railway's
+`PUBLIC_URL` variable to the game's full HTTPS origin (for example,
+`https://your-game.up.railway.app`), redeploy, and reload the game to generate a
+fresh QR code. Remove any stale Cloudflare `PUBLIC_URL` override when moving hosts.
+Keep one service replica: game rooms currently live in that process's memory.
+
+Run `node --import tsx --test scripts/controller-url.test.ts` for URL regressions.
