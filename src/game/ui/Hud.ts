@@ -2,16 +2,58 @@ import QRCode from 'qrcode';
 import type { ConnectionStatus } from '../net/GameSocket';
 import type { PlayerSlot, SteerMode } from '../../shared/protocol';
 
+// §v4: one lobby seat — a QR block (title, code image, room code, hint) plus
+// the confirmation line that replaces it once that seat's phone is connected.
+interface SeatPanel {
+  root: HTMLDivElement;
+  titleEl: HTMLDivElement;
+  qrBlock: HTMLDivElement;
+  qrCanvas: HTMLCanvasElement;
+  codeEl: HTMLDivElement;
+  statusEl: HTMLDivElement;
+  connected: boolean;
+}
+
+function buildSeatPanel(slot: number): SeatPanel {
+  const root = document.createElement('div');
+
+  const qrBlock = document.createElement('div');
+  qrBlock.style.cssText =
+    'display:flex; flex-direction:column; align-items:center; gap:12px;';
+  root.appendChild(qrBlock);
+
+  const titleEl = document.createElement('div');
+  titleEl.style.cssText = 'font-size:20px; opacity:0.85;';
+  titleEl.textContent = slot === 0 ? 'Scan to connect your phone' : `Player ${slot + 1} — scan to join`;
+  qrBlock.appendChild(titleEl);
+
+  const qrCanvas = document.createElement('canvas');
+  qrCanvas.style.cssText = 'background:#fff; padding:8px; border-radius:8px;';
+  qrBlock.appendChild(qrCanvas);
+
+  const codeEl = document.createElement('div');
+  codeEl.style.cssText = 'font-size:56px; font-weight:700; letter-spacing:8px;';
+  qrBlock.appendChild(codeEl);
+
+  const statusEl = document.createElement('div');
+  statusEl.style.cssText =
+    'font-size:15px; padding:8px 18px; border-radius:999px; background:#27ae60; display:none;';
+  root.appendChild(statusEl);
+
+  return { root, titleEl, qrBlock, qrCanvas, codeEl, statusEl, connected: false };
+}
+
 // Shared chrome only (Phase 2c) — per-player race readouts (lap/pos/speed,
 // drift bar, item slot) live in PlayerHud.ts, one instance per human player.
 export class Hud {
   private root: HTMLDivElement;
   private pill: HTMLDivElement;
-  private lobbyPanel: HTMLDivElement;
-  private codeEl: HTMLDivElement;
-  private qrCanvas: HTMLCanvasElement;
-  private p1PeerEl: HTMLDivElement;
-  private p2PeerEl: HTMLDivElement;
+  // §v4: one lobby panel per seat rather than one shared one. In two-player
+  // mode each half of the split screen carries its own QR code, and a half's
+  // code disappears the moment that seat's phone connects.
+  private seats: SeatPanel[];
+  private lobbyVisible = false;
+  private seatSplit = false;
   private kbBadge: HTMLDivElement;
   private steerModeBadge: HTMLDivElement;
   private divider: HTMLDivElement;
@@ -54,41 +96,9 @@ export class Hud {
       'background:rgba(255,255,255,0.35); display:none; z-index:2;';
     this.root.appendChild(this.divider);
 
-    this.lobbyPanel = document.createElement('div');
-    this.lobbyPanel.style.cssText =
-      'position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; background:rgba(0,0,0,0.55); pointer-events:auto;';
-    this.root.appendChild(this.lobbyPanel);
-
-    const title = document.createElement('div');
-    title.textContent = 'Scan to connect your phone';
-    title.style.cssText = 'font-size:20px; opacity:0.85;';
-    this.lobbyPanel.appendChild(title);
-
-    this.qrCanvas = document.createElement('canvas');
-    this.qrCanvas.style.cssText = 'background:#fff; padding:8px; border-radius:8px;';
-    this.lobbyPanel.appendChild(this.qrCanvas);
-
-    this.codeEl = document.createElement('div');
-    this.codeEl.style.cssText = 'font-size:72px; font-weight:700; letter-spacing:8px;';
-    this.lobbyPanel.appendChild(this.codeEl);
-
-    // P1 is required (red until connected); P2 is an optional second seat
-    // (neutral gray until connected) — the same QR/room code joins either slot.
-    const peerRow = document.createElement('div');
-    peerRow.style.cssText = 'display:flex; flex-direction:column; gap:6px; align-items:center;';
-    this.lobbyPanel.appendChild(peerRow);
-
-    this.p1PeerEl = document.createElement('div');
-    this.p1PeerEl.style.cssText =
-      'font-size:14px; padding:6px 16px; border-radius:999px; background:#c0392b;';
-    this.p1PeerEl.textContent = 'P1: waiting for phone…';
-    peerRow.appendChild(this.p1PeerEl);
-
-    this.p2PeerEl = document.createElement('div');
-    this.p2PeerEl.style.cssText =
-      'font-size:14px; padding:6px 16px; border-radius:999px; background:#7f8c8d;';
-    this.p2PeerEl.textContent = 'P2: scan to join (optional)';
-    peerRow.appendChild(this.p2PeerEl);
+    this.seats = [buildSeatPanel(0), buildSeatPanel(1)];
+    for (const seat of this.seats) this.root.appendChild(seat.root);
+    this.applySeatLayout();
 
     this.countdownEl = document.createElement('div');
     this.countdownEl.style.cssText =
@@ -123,11 +133,16 @@ export class Hud {
     this.root.appendChild(this.resultsPanel);
   }
 
+  // Both seats show the SAME room code and QR: the server hands whoever scans
+  // first the free slot (§Phase 2a), so the two codes are interchangeable —
+  // what differs is which half of the screen each one is standing in front of.
   showRoom(code: string, joinUrl: string) {
-    this.codeEl.textContent = code;
-    QRCode.toCanvas(this.qrCanvas, joinUrl, { width: 220, margin: 1 }).catch(() => {
-      /* rendering the QR is a nicety; the text code still works */
-    });
+    for (const seat of this.seats) {
+      seat.codeEl.textContent = code;
+      QRCode.toCanvas(seat.qrCanvas, joinUrl, { width: 190, margin: 1 }).catch(() => {
+        /* rendering the QR is a nicety; the text code still works */
+      });
+    }
   }
 
   setConnectionStatus(status: ConnectionStatus) {
@@ -141,16 +156,19 @@ export class Hud {
     this.pill.style.background = color;
   }
 
-  // Lobby-only per-slot connection status (Phase 2c) — the same QR/room code
-  // joins either slot; the server assigns whichever is free.
+  // §v4: a seat's QR block disappears as soon as that seat's phone is on, and
+  // is replaced by a slim confirmation pill — so a split screen ends up with
+  // one code left standing in front of whoever hasn't joined yet, and the
+  // dimming panel lifts off the track once a seat is filled.
   setPeerStatus(slot: PlayerSlot, connected: boolean) {
-    if (slot === 0) {
-      this.p1PeerEl.textContent = connected ? 'P1 connected ✓' : 'P1: waiting for phone…';
-      this.p1PeerEl.style.background = connected ? '#27ae60' : '#c0392b';
-    } else {
-      this.p2PeerEl.textContent = connected ? 'P2 connected ✓' : 'P2: scan to join (optional)';
-      this.p2PeerEl.style.background = connected ? '#27ae60' : '#7f8c8d';
-    }
+    const seat = this.seats[slot];
+    seat.connected = connected;
+    seat.qrBlock.style.display = connected ? 'none' : 'flex';
+    seat.statusEl.textContent = connected
+      ? `P${slot + 1} connected ✓ — pick a character, then START`
+      : '';
+    seat.statusEl.style.display = connected ? 'block' : 'none';
+    seat.root.style.background = connected ? 'transparent' : 'rgba(0,0,0,0.55)';
   }
 
   setKeyboardActive(active: boolean) {
@@ -167,16 +185,43 @@ export class Hud {
   }
 
   // Shown only while two players are actively racing split-screen (§Phase 2c).
+  // §v4: also decides whether the lobby shows one full-screen QR or one per
+  // half, since that is the same question.
   setSplit(split: boolean) {
     this.divider.style.display = split ? 'block' : 'none';
+    if (split === this.seatSplit) return;
+    this.seatSplit = split;
+    this.applySeatLayout();
   }
 
+  private applySeatLayout() {
+    const box = ['left:0; top:0; bottom:0; width:50%;', 'right:0; top:0; bottom:0; width:50%;'];
+    this.seats.forEach((seat, i) => {
+      const positioned = this.seatSplit ? box[i] : 'inset:0;';
+      // Seat 1 only exists on a split screen; solo play has a single seat.
+      const visible = this.lobbyVisible && (this.seatSplit || i === 0);
+      seat.root.style.cssText =
+        'position:absolute; display:flex; flex-direction:column; align-items:center; justify-content:center; ' +
+        `gap:14px; pointer-events:auto; text-align:center; padding:0 16px; box-sizing:border-box; ${positioned}` +
+        (visible ? ' ' : ' display:none;');
+      seat.root.style.background = seat.connected ? 'transparent' : 'rgba(0,0,0,0.55)';
+      seat.titleEl.textContent = this.seatSplit ? `Player ${i + 1} — scan to join` : 'Scan to connect your phone';
+    });
+  }
+
+  // Both are called every frame from main.ts's race-state switch, so they
+  // no-op unless the state actually changed — applySeatLayout rewrites style
+  // strings and is not something to run 60 times a second.
   hideLobby() {
-    this.lobbyPanel.style.display = 'none';
+    if (!this.lobbyVisible) return;
+    this.lobbyVisible = false;
+    this.applySeatLayout();
   }
 
   showLobby() {
-    this.lobbyPanel.style.display = 'flex';
+    if (this.lobbyVisible) return;
+    this.lobbyVisible = true;
+    this.applySeatLayout();
   }
 
   showCountdown(text: string) {

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { TrackSample } from './TrackBuilder';
-import { SURFACE_ZONES, type SurfaceZone } from './trackData';
+import { type SurfaceZone } from './trackData';
 
 const CELL_SIZE = 8;
 
@@ -116,9 +116,13 @@ export class TrackQuery {
   private boundsMinZ = Infinity;
   private boundsMaxZ = -Infinity;
 
+  // §v4: the surface zones arrive from the loaded map (maps.ts) rather than
+  // being imported as a module constant — they are per-map data, and this
+  // class is built fresh for whichever map the player picked.
   constructor(
     private samples: TrackSample[],
     private totalLength: number,
+    private surfaceZones: readonly SurfaceZone[] = [],
   ) {
     this.allIndices = samples.map((_, i) => i);
     for (let i = 0; i < samples.length; i++) {
@@ -320,13 +324,13 @@ export class TrackQuery {
     return { dist, blendY: sumWY / sumW, clampY };
   }
 
-  // §Phase 4 item 4. Wrap-aware linear scan over SURFACE_ZONES (a handful of
+  // §Phase 4 item 4. Wrap-aware linear scan over the map's zones (a handful of
   // entries — no need for a spatial index). Returns the first zone's type
   // that contains (s, lateral), or null off any zone. `s` wraps at
   // totalLength the same way `sStart > sEnd` zones do (isInZone below).
   surfaceAt(s: number, lateral: number): SurfaceZone['type'] | null {
     const sWrapped = ((s % this.totalLength) + this.totalLength) % this.totalLength;
-    for (const zone of SURFACE_ZONES) {
+    for (const zone of this.surfaceZones) {
       const inS =
         zone.sStart <= zone.sEnd
           ? sWrapped >= zone.sStart && sWrapped <= zone.sEnd

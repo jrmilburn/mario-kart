@@ -301,23 +301,18 @@ export function initControllerUI(root: HTMLElement) {
   root.appendChild(toast);
   let toastTimer: number | null = null;
 
-  function showToast(message: string, retry?: () => void) {
+  // §v3 polish: the optional "⚙ retry" chip is gone along with its sticky
+  // (never auto-hiding) toast variant. Its only user was the tilt-permission
+  // failure path, which now gets the full-screen tiltGate instead — a retry
+  // affordance you could actually see. Every remaining toast is transient.
+  function showToast(message: string) {
     toast.innerHTML = '';
     const text = document.createElement('span');
     text.textContent = message;
     toast.appendChild(text);
-    if (retry) {
-      const retryBtn = document.createElement('button');
-      retryBtn.textContent = '⚙ retry';
-      retryBtn.style.cssText =
-        'margin-left:10px; background:none; border:1px solid #fff; color:#fff; border-radius:6px; ' +
-        'padding:2px 8px; font-size:12px;';
-      retryBtn.addEventListener('click', retry);
-      toast.appendChild(retryBtn);
-    }
     toast.style.display = 'block';
     if (toastTimer !== null) window.clearTimeout(toastTimer);
-    if (!retry) toastTimer = window.setTimeout(() => (toast.style.display = 'none'), 3500);
+    toastTimer = window.setTimeout(() => (toast.style.display = 'none'), 3500);
   }
 
   function hideToast() {
@@ -351,6 +346,54 @@ export function initControllerUI(root: HTMLElement) {
     'background:#27ae60; color:#fff;';
   calibrationPanel.appendChild(setBtn);
   root.appendChild(calibrationPanel);
+
+  // §v3 polish: the "one tap to grant tilt" gate (see primeTiltPermission).
+  // z-index 18 sits above characterScreen (16) so it is the first thing a
+  // freshly-joined phone shows, but below portraitBlocker (20) — rotating the
+  // phone is the more fundamental instruction — and below calibrationPanel
+  // (25), which is what replaces it the moment permission is granted.
+  const tiltGate = document.createElement('div');
+  tiltGate.style.cssText =
+    'position:fixed; inset:0; display:none; flex-direction:column; align-items:center; ' +
+    'justify-content:center; gap:18px; background:#0b0b0b; z-index:18; text-align:center; padding:0 32px;';
+  const tiltGateBody = document.createElement('div');
+  tiltGateBody.innerHTML =
+    '<div style="font-size:56px;">🎡</div>' +
+    '<div style="font-size:24px; font-weight:700; margin-top:12px;">Tap to steer by tilting</div>' +
+    '<div style="font-size:15px; opacity:0.7; margin-top:8px; line-height:1.5;">' +
+    'iOS needs one tap before it will hand over the motion sensor.</div>';
+  tiltGate.appendChild(tiltGateBody);
+  const tiltGateTouchBtn = document.createElement('button');
+  tiltGateTouchBtn.textContent = 'Use touch steering instead';
+  tiltGateTouchBtn.style.cssText =
+    'margin-top:8px; padding:12px 20px; font-size:15px; border:0; border-radius:10px; ' +
+    'background:#34495e; color:#fff;';
+  tiltGate.appendChild(tiltGateTouchBtn);
+  root.appendChild(tiltGate);
+
+  function showTiltGate() {
+    tiltGate.style.display = 'flex';
+  }
+
+  function hideTiltGate() {
+    tiltGate.style.display = 'none';
+  }
+
+  // The whole panel is the button — a tap anywhere on it is the gesture iOS
+  // wants. A failure at this point is a real denial (the user said no in the
+  // system prompt), so it falls back to touch rather than re-gating.
+  tiltGate.addEventListener('click', () => {
+    void enableTilt().then((ok) => {
+      if (!ok) {
+        hideTiltGate();
+        showToast('Tilt unavailable — using touch.');
+      }
+    });
+  });
+  tiltGateTouchBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideTiltGate();
+  });
 
   // Auto-throttle toggle: default OFF in touch / ON in tilt, but that default
   // only applies until the user explicitly touches the toggle themselves —
@@ -404,27 +447,56 @@ export function initControllerUI(root: HTMLElement) {
     switchToTilt();
   });
 
-  // §3.7 availability gate: secure context -> API exists -> (iOS) permission
-  // granted from this tap handler. Any failure falls back to touch with a toast.
-  async function enableTilt() {
-    const availability = checkTiltAvailability();
-    if (availability !== 'available') {
-      showToast('Tilt unavailable — using touch.');
-      return;
-    }
+  // §v3 polish: iOS gates DeviceOrientation behind
+  // DeviceOrientationEvent.requestPermission(), which only ever resolves from
+  // inside a real user gesture. Joining by scanning the QR code involves no
+  // tap at all — the page opens with ?room=XXXX and auto-joins — so the
+  // attempt fired from onJoined was rejected every time on iOS, and the only
+  // way to actually grant tilt was the tiny "⚙ retry" chip inside a toast.
+  // Two changes fix that: the prompt is fired from the JOIN tap whenever
+  // there is one, and when there isn't, a full-screen gate asks for the one
+  // tap the platform requires the moment we join.
+  let tiltPermission: boolean | null = null; // null = not granted yet, still retryable
+
+  // Safe to call from anywhere; the platform prompt only actually appears when
+  // this runs synchronously inside a user gesture (everything before the first
+  // `await` here does, so calling it straight from a click handler works).
+  async function primeTiltPermission(): Promise<boolean> {
+    if (checkTiltAvailability() !== 'available') return false;
+    if (tiltPermission) return true;
     const granted = await requestTiltPermission();
-    if (!granted) {
-      showToast('Tilt unavailable — using touch.', enableTilt);
-      return;
+    // A rejection outside a gesture is indistinguishable from a real "no", so
+    // only a grant is cached — the gate below gets to ask again from a tap.
+    if (granted) tiltPermission = true;
+    return granted;
+  }
+
+  // §3.7 availability gate: secure context -> API exists -> (iOS) permission.
+  // Returns whether tilt is now live, so the caller can decide between the
+  // gate (we just need a tap) and plain touch fallback (tilt is impossible).
+  async function enableTilt(): Promise<boolean> {
+    if (checkTiltAvailability() !== 'available') {
+      showToast('Tilt unavailable — using touch.');
+      return false;
     }
+    if (!(await primeTiltPermission())) return false;
     hideToast();
+    hideTiltGate();
     tiltSteering.attach();
     openCalibration();
+    return true;
   }
 
   modeToggle.addEventListener('click', () => {
-    if (steerMode === 'touch') enableTilt();
-    else switchToTouch();
+    if (steerMode !== 'touch') {
+      switchToTouch();
+      return;
+    }
+    // This IS a gesture, so a failure here is a genuine denial rather than a
+    // missing tap — no point showing the gate, which only asks for a tap.
+    void enableTilt().then((ok) => {
+      if (!ok) showToast('Tilt unavailable — using touch.');
+    });
   });
   recalibrateBtn.addEventListener('click', openCalibration);
 
@@ -754,11 +826,15 @@ export function initControllerUI(root: HTMLElement) {
           hideRaceOverlay();
           showCharacterScreen();
           wakeLock.start();
-          // Tilt is the default steering mode; attempt it once per session,
-          // falling back to touch (with a one-tap retry toast) if unavailable.
+          // Tilt is the default steering mode; attempt it once per session.
+          // §v3 polish: if the attempt fails only because the platform wants a
+          // gesture (i.e. tilt is otherwise available), show the full-screen
+          // gate immediately instead of the old easy-to-miss retry toast.
           if (!tiltAutoAttempted) {
             tiltAutoAttempted = true;
-            enableTilt();
+            void enableTilt().then((ok) => {
+              if (!ok && checkTiltAvailability() === 'available') showTiltGate();
+            });
           }
         },
         onJoinError: (reason) => {
@@ -783,7 +859,14 @@ export function initControllerUI(root: HTMLElement) {
 
   joinButton.addEventListener('click', () => {
     const code = codeInput.value.trim().toUpperCase();
-    if (code.length === 4) join(code);
+    if (code.length !== 4) return;
+    // §v3 polish: fire the iOS motion-permission prompt from inside this tap,
+    // the one gesture a manual join is guaranteed to have. By the time
+    // onJoined runs the answer is already cached, so tilt comes up without
+    // the gate. (The QR auto-join path below has no gesture to borrow — that
+    // is what the gate is for.)
+    void primeTiltPermission();
+    join(code);
   });
 
   const params = new URLSearchParams(location.search);

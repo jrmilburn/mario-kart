@@ -32,7 +32,12 @@ export function createPlayer(
   entityIndex: number,
   groundHeightAt: (pos: THREE.Vector3) => number,
 ): Player {
-  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+  // §v3 polish: far plane 1000 -> 1500. The new mountain rings stand well
+  // beyond the circuit, and a camera on the far side of the track from the
+  // furthest peak is ~950m away from it — inside 1000 only by a hair, and
+  // clipped outright if the rings ever move. `near` is untouched, so depth
+  // precision at kart range is unchanged.
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1500);
   return {
     slot,
     entityIndex,

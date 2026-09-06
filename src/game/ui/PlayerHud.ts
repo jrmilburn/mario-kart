@@ -1,6 +1,6 @@
 import type { ItemType } from '../items/ItemSystem';
 
-const ITEM_ICONS: Record<ItemType, string> = { mushroom: '🍄', banana: '🍌', shell: '🐚' };
+const ITEM_ICONS: Record<ItemType, string> = { goldenMushroom: '\u{1F344}\u2728', tripleBanana: '\u{1F34C}3', mushroom: '🍄', banana: '🍌', shell: '🐚' };
 // §v3 Track C1: the "ready" ring is drawn in the item's own colour, so the
 // slot answers "what have I got?" from peripheral vision without reading the
 // icon. Matched to ItemVisuals' in-world sprites so the HUD and the floating
@@ -9,7 +9,11 @@ const ITEM_COLORS: Record<ItemType, string> = {
   mushroom: '#e74c3c',
   banana: '#f5d327',
   shell: '#2ecc71',
+  goldenMushroom: '#ffca32',
+  tripleBanana: '#f5d327',
 };
+
+const ITEM_NAMES: Record<ItemType, string> = { mushroom: 'Mushroom', banana: 'Banana', shell: 'Homing shell', goldenMushroom: 'Golden Mushroom: sustained boost', tripleBanana: 'Triple Bananas: three-way drop' };
 
 const ITEM_SLOT_SIZE = 76; // §v3 Track C1: up from 56px — half-screen split viewports made the old slot easy to miss
 
@@ -170,7 +174,12 @@ export class PlayerHud {
     // property on every roulette tick would restart its spin keyframes from
     // 0deg each time and the ring would never visibly turn at all.
     const icon = state.item ? ITEM_ICONS[state.item] : '';
-    if (this.itemIcon.textContent !== icon) this.itemIcon.textContent = icon;
+    if (this.itemIcon.textContent !== icon) {
+      this.itemIcon.textContent = icon;
+      this.itemIcon.style.fontSize = state.item === 'goldenMushroom' || state.item === 'tripleBanana' ? '28px' : '42px';
+      this.itemSlot.title = state.item ? ITEM_NAMES[state.item] : 'No item';
+      this.itemSlot.setAttribute('aria-label', this.itemSlot.title);
+    }
 
     const phase = state.rolling ? 'rolling' : state.item ? `ready:${state.item}` : 'empty';
     if (phase === this.itemPhase) return;

@@ -1,56 +1,27 @@
-import * as THREE from 'three';
+// Track geometry constants shared by every map, plus the SurfaceZone shape.
+// The per-map data — control points, surface zones, visual style — lives in
+// maps.ts (§v4); this file is what stays the same whichever map is loaded.
 
-// Hand-authored closed circuit (§3.1, redesigned §Phase 4 item 5). Start/finish
-// straight, a double-apex right-hander, a flowing esses, a long back
-// straight (~181m, clearly the longest single straight), and a two-part
-// hairpin complex back to the line — a clean non-self-intersecting ~1001m
-// loop (verified via a throwaway arc-length clearance script: no two of the
-// 600 rendered samples more than 40m apart along the track are ever closer
-// than 2*GRASS_HALF+2 = 30m in x/z; worst case ~33.7m).
-//
-// §Phase 5 item 1: y values authored on top of the flat Phase 4 layout —
-// physics stays 2D-projected (x/z only), y is purely a visual/height query
-// concern layered on afterward (see TrackBuilder/TrackQuery/main.ts). Profile:
-// flat start/finish straight (0/1 pinned at y=0 so the grid start is level),
-// a gentle dip through the double-apex (2-6), climbing through the connecting
-// curve and esses (7-10) to an ~8m crest right where the esses feed onto the
-// back straight (11), a long gentle descent down the back straight into the
-// braking zone (12-13), and level again through the hairpin and back to the
-// line (14-17). Control-point-to-point grades top out ~5.3% (esses climb),
-// well under the ~10% budget — see buildSamples' dev-time grade assertion for
-// the actual worst per-sample figure once Catmull-Rom smoothing is applied.
-export const CONTROL_POINTS: THREE.Vector3[] = [
-  new THREE.Vector3(0, 0, 0), // 0 start/finish
-  new THREE.Vector3(0, 0, 101.84), // 1 end of long start straight
-  new THREE.Vector3(9.32, -0.5, 127.31), // 2 double-apex turn-in
-  new THREE.Vector3(36.02, -1.5, 142.83), // 3 double-apex, apex 1
-  new THREE.Vector3(62.1, -1.0, 136.62), // 4 double-apex, easing between apexes
-  new THREE.Vector3(91.91, -1.8, 145.94), // 5 double-apex, apex 2
-  new THREE.Vector3(116.75, -1.0, 124.2), // 6 double-apex exit
-  new THREE.Vector3(96.26, 0.5, 86.94), // 7 connecting curve into the esses
-  new THREE.Vector3(82.8, 2.0, 62.1), // 8 esses entry
-  new THREE.Vector3(62.93, 4.0, 28.98), // 9 esses kink 1
-  new THREE.Vector3(87.77, 6.0, -4.14), // 10 esses kink 2
-  new THREE.Vector3(80.32, 8.0, -45.54), // 11 esses exit, entering the back straight -- crest of the hill
-  new THREE.Vector3(80.24, 2.0, -225.9), // 12 long back straight -- gentle descent
-  new THREE.Vector3(55.04, 1.0, -261.9), // 13 braking zone into the hairpin
-  new THREE.Vector3(15.44, 0, -272.7), // 14 hairpin apex
-  new THREE.Vector3(-15.3, 0, -198), // 15 hairpin exit
-  new THREE.Vector3(-22.2, 0, -149), // 16 sweeping back toward the start
-  new THREE.Vector3(-4.93, 0, -88.56), // 17 final approach, merging onto the start straight
-];
-
-export const ROAD_HALF = 6;
+// §v3 polish: widened from 6 to 7.5 (a 25% wider racing surface) — the road
+// is the only thing that grew. GRASS_HALF stays at 14 deliberately: the
+// terrain heightfield's anti-breakthrough clamp radius is derived from it and
+// was verified empirically against this ribbon width (see TERRAIN_CLAMP_RADIUS
+// in Environment.ts), so widening the grass would invalidate that census while
+// widening the road cannot — every road-derived value (the ribbon, its
+// stripes, the start banner, the cone line, boost-pad quads, the offRoad test)
+// is computed from ROAD_HALF, so this one number moves them all together.
+export const ROAD_HALF = 7.5;
 export const GRASS_HALF = 14;
 export const CHECKPOINT_COUNT = 16;
 
-// §Phase 4 item 4. `sStart`/`sEnd` are arc-length positions in meters
-// (wrap-aware: sStart > sEnd means the zone spans across the start/finish
-// seam — TrackQuery.surfaceAt handles that). `latMin`/`latMax` are signed
-// lateral bounds (same convention as TrackQuery's `lateral`, §TrackQuery.ts);
-// omitted means unbounded on that side, i.e. the zone applies at any lateral
-// offset within the s-range. Placed here (not TrackBuilder) so main.ts and
-// TrackQuery can both import the data without a build-time dependency on THREE.
+// §Phase 4 item 4 (shape only — the zones themselves are per-map, see maps.ts).
+// `sStart`/`sEnd` are arc-length positions in meters (wrap-aware: sStart >
+// sEnd means the zone spans across the start/finish seam — TrackQuery.surfaceAt
+// handles that). `latMin`/`latMax` are signed lateral bounds (same convention
+// as TrackQuery's `lateral`, §TrackQuery.ts); omitted means unbounded on that
+// side, i.e. the zone applies at any lateral offset within the s-range.
+// Declared here (not in maps.ts) so TrackQuery and main.ts can import the type
+// without importing map data.
 export interface SurfaceZone {
   sStart: number;
   sEnd: number;
@@ -58,25 +29,3 @@ export interface SurfaceZone {
   latMin?: number;
   latMax?: number;
 }
-
-// Three boost pads on the racing line (mid start-straight, mid back-straight,
-// on the straightaway just past the hairpin exit) plus one sand trap
-// punishing a tight inside cut through the hairpin apex (s=717.5). Re-placed
-// here for the §Phase 4 item 5 layout (was authored against the old ~620m
-// layout in §Phase 4 item 4).
-//
-// §Phase 4 finding #1: the sand zone's latMin sits *inside* ROAD_HALF (not at
-// or beyond it) so the patch straddles the pavement itself along the apex's
-// inside line, not just the grass beyond the road edge -- that grass is
-// already penalized identically by the plain offRoad check, so a zone
-// confined to it would be a mechanical no-op. A kart hugging the tight inside
-// line through the apex (positive lateral, matching this right-hand hairpin's
-// inside) now drives through sand while still nominally on the road; the
-// wider/safer line past latMax stays clean. See Kart.ts's sandSpeedCap/sandDecel
-// for why sand and grass now feel different, too.
-export const SURFACE_ZONES: SurfaceZone[] = [
-  { sStart: 55, sEnd: 65, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
-  { sStart: 515, sEnd: 528, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
-  { sStart: 815, sEnd: 828, type: 'boost', latMin: -ROAD_HALF, latMax: ROAD_HALF },
-  { sStart: 705, sEnd: 725, type: 'sand', latMin: 2, latMax: 9 },
-];

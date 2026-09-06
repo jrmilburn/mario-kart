@@ -4,8 +4,8 @@ import { kartForward, type KartState } from '../physics/Kart';
 import type { TrackSample } from '../track/TrackBuilder';
 import { sampleAtArcLength } from '../track/TrackQuery';
 
-export type ItemType = 'mushroom' | 'banana' | 'shell';
-const ITEM_TYPES: ItemType[] = ['mushroom', 'banana', 'shell'];
+export type ItemType = 'mushroom' | 'banana' | 'shell' | 'goldenMushroom' | 'tripleBanana';
+const ITEM_TYPES: ItemType[] = ['mushroom', 'banana', 'shell', 'goldenMushroom', 'tripleBanana'];
 
 export const ITEM_BOX_COUNT = 6;
 const ITEM_BOX_RESPAWN_SECONDS = 3;
@@ -146,20 +146,27 @@ export function useItem(args: {
   const { kartIndex, kart, held, bananas, shells, targetIndex, fireS } = args;
   if (!held.item) return false;
 
-  if (held.item === 'mushroom') {
-    kart.boostTimer = TUNING.boostDurations[1]; // instant tier-2 boost
-  } else if (held.item === 'banana') {
-    const ownerBananas = bananas.filter((b) => b.ownerIndex === kartIndex);
-    if (ownerBananas.length >= BANANA_MAX_PER_KART) {
-      bananas.splice(bananas.indexOf(ownerBananas[0]), 1); // oldest makes way for the new one
+  if (held.item === 'mushroom' || held.item === 'goldenMushroom') {
+    // Gold grants one sustained boost; never shorten an existing boost.
+    kart.boostTimer = Math.max(kart.boostTimer, held.item === 'goldenMushroom' ? 4.5 : TUNING.boostDurations[1]);
+  } else if (held.item === 'banana' || held.item === 'tripleBanana') {
+    const count = held.item === 'tripleBanana' ? 3 : 1;
+    for (let i = 0; i < count; i++) {
+      const ownerBananas = bananas.filter((b) => b.ownerIndex === kartIndex);
+      if (ownerBananas.length >= BANANA_MAX_PER_KART) {
+        bananas.splice(bananas.indexOf(ownerBananas[0]), 1); // oldest makes way for the new one
+      }
+      const pos = kart.pos.clone().addScaledVector(kartForward(kart.heading), -BANANA_DROP_DISTANCE);
+      const spread = count === 3 ? (i - 1) * 1.8 : 0;
+      pos.x += Math.cos(kart.heading) * spread;
+      pos.z -= Math.sin(kart.heading) * spread;
+      // §v3 Track C2: the throw starts at the driver's hands (just behind and
+      // above the kart's contact patch) and lands on `pos`; `tossTimer` keeps it
+      // unarmed for the whole flight.
+      const spawnFrom = kart.pos.clone().addScaledVector(kartForward(kart.heading), -0.5);
+      spawnFrom.y += BANANA_TOSS_LAUNCH_HEIGHT;
+      bananas.push({ pos, ownerIndex: kartIndex, spawnFrom, tossTimer: BANANA_TOSS_SECONDS });
     }
-    const pos = kart.pos.clone().addScaledVector(kartForward(kart.heading), -BANANA_DROP_DISTANCE);
-    // §v3 Track C2: the throw starts at the driver's hands (just behind and
-    // above the kart's contact patch) and lands on `pos`; `tossTimer` keeps it
-    // unarmed for the whole flight.
-    const spawnFrom = kart.pos.clone().addScaledVector(kartForward(kart.heading), -0.5);
-    spawnFrom.y += BANANA_TOSS_LAUNCH_HEIGHT;
-    bananas.push({ pos, ownerIndex: kartIndex, spawnFrom, tossTimer: BANANA_TOSS_SECONDS });
   } else if (held.item === 'shell') {
     if (targetIndex === null) return false; // leading the race: nothing to target, keep holding
     shells.push({ pos: kart.pos.clone(), s: fireS, ownerIndex: kartIndex, targetIndex, age: 0 });

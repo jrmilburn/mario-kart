@@ -92,7 +92,13 @@ export function think(
   // 4. Drift (hysteresis between enter/exit angle so it doesn't chatter)
   if (!ai.driftHeld && cornerAngle > DRIFT_ENTER_ANGLE && Math.abs(kart.speed) > T.driftMinSpeed + 3) {
     ai.driftHeld = true;
-  } else if (ai.driftHeld && cornerAngle < DRIFT_EXIT_ANGLE) {
+  } else if (ai.driftHeld && (
+    cornerAngle < DRIFT_EXIT_ANGLE ||
+    // A long horseshoe can stay curved after the kart has already rotated
+    // onto its exit line. Release before a fixed-direction drift overshoots
+    // that line, including when a switchback asks for opposite steering.
+    (kart.drift.phase === 'active' && angleToTarget * kart.drift.dir < 0.12)
+  )) {
     ai.driftHeld = false;
   }
 

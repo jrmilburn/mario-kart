@@ -129,3 +129,25 @@ PUBLIC_URL=https://your-tunnel-url.trycloudflare.com npm start
 
 The QR code and room code now encode the tunnel URL instead of the LAN IP — any phone on
 any network can join, no certificate installation needed.
+
+
+### Graphics and items
+
+Rainbow Ridge now uses a SNES-inspired jewel-tile road and twinkling star accents,
+with a 1.73km layout: climbing slalom, 32m summit horseshoe, descending
+switchback, low final bend and five boost pads. The start grid remains level. The countryside
+has instanced wildflower verges. Procedural drivers have smoother silhouettes,
+coloured irises and catchlights, plus steering and boost body movement.
+
+Question-mark boxes tumble and burst into coloured shards when collected. Banana
+peels and segmented shells replace the old placeholder shapes. Item use emits a
+short spark burst; existing exhaust flames, shell trails and throw arcs remain.
+
+The roulette now includes **Golden Mushroom** (one sustained 4.5-second boost)
+and **Triple Bananas** (three peels tossed in a fan behind the kart). The existing
+three-banana limit per racer still applies. Both work for human and AI racers.
+
+Run `node --import tsx --test scripts/items.test.ts` for item behavior and geometry
+checks. Run `node --import tsx --test scripts/rainbow.test.ts` for track geometry
+and three-lap AI simulations. Preview each map with `?mode=single&map=rainbow` or
+`?mode=single&map=circuit` on the dev server.

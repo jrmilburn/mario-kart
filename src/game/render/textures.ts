@@ -63,6 +63,35 @@ export function buildGrassTexture(): THREE.CanvasTexture {
   return texture;
 }
 
+// Eight jewel tiles across the road, with staggered colours along its length.
+// UVs repeat every road-width in metres so the tiles remain approximately square.
+// Fine dark grout and bright bevels keep the mosaic readable at racing speed.
+export function buildRainbowTexture(): THREE.CanvasTexture {
+  const { canvas, ctx } = makeCanvas(512);
+  const palette = ['#ff3564', '#ff922e', '#ffe64c', '#52ef77', '#31dcea', '#4286ff', '#9258ff', '#ff66cf'];
+  const tile = 64;
+  ctx.fillStyle = '#251b49';
+  ctx.fillRect(0, 0, 512, 512);
+  for (let row = 0; row < 8; row++) {
+    for (let col = 0; col < 8; col++) {
+      const x = col * tile, y = row * tile;
+      ctx.fillStyle = palette[(col + row) % 8];
+      ctx.fillRect(x + 1, y + 1, tile - 2, tile - 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.38)';
+      ctx.fillRect(x + 2, y + 2, tile - 4, 3);
+      ctx.fillRect(x + 2, y + 2, 2, tile - 4);
+      ctx.fillStyle = 'rgba(18,10,50,0.24)';
+      ctx.fillRect(x + 3, y + tile - 4, tile - 5, 3);
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.anisotropy = 8;
+  return texture;
+}
+
 // Swaps in a real image at `url` if present, keeping the procedural texture
 // already on `material.map` as the permanent fallback on any load error (a
 // missing file under public/assets/textures/ is the expected default state).

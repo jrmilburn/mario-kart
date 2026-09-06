@@ -47,10 +47,10 @@ function drawBacking(ctx: CanvasRenderingContext2D, size: number) {
 // baked once at startup, so a bad glyph would be permanent.
 function drawItemGlyph(ctx: CanvasRenderingContext2D, size: number, item: ItemType) {
   const c = size / 2;
-  if (item === 'mushroom') {
+  if (item === 'mushroom' || item === 'goldenMushroom') {
     ctx.fillStyle = '#f4f0e6'; // stem
     ctx.fillRect(c - size * 0.13, c, size * 0.26, size * 0.24);
-    ctx.fillStyle = '#e74c3c'; // cap
+    ctx.fillStyle = item === 'goldenMushroom' ? '#ffca32' : '#e74c3c'; // cap
     ctx.beginPath();
     ctx.arc(c, c + size * 0.02, size * 0.29, Math.PI, 0);
     ctx.fill();
@@ -64,7 +64,7 @@ function drawItemGlyph(ctx: CanvasRenderingContext2D, size: number, item: ItemTy
       ctx.arc(c + dx * size, c + dy * size, r * size, 0, Math.PI * 2);
       ctx.fill();
     }
-  } else if (item === 'banana') {
+  } else if (item === 'banana' || item === 'tripleBanana') {
     // Crescent: a filled arc band, thick enough to survive at 20px on screen.
     ctx.strokeStyle = '#f5d327';
     ctx.lineCap = 'round';
@@ -72,6 +72,9 @@ function drawItemGlyph(ctx: CanvasRenderingContext2D, size: number, item: ItemTy
     ctx.beginPath();
     ctx.arc(c + size * 0.08, c, size * 0.27, Math.PI * 0.35, Math.PI * 1.25);
     ctx.stroke();
+    if (item === 'tripleBanana') {
+      ctx.font = 'bold 34px sans-serif'; ctx.fillStyle = '#fff'; ctx.fillText('3', size * 0.58, size * 0.76);
+    }
     ctx.strokeStyle = '#6b4f16'; // stalk
     ctx.lineWidth = size * 0.06;
     ctx.beginPath();
@@ -156,8 +159,8 @@ export class HeldItemMarkers {
         // or by a kart in front of it.
         depthWrite: false,
       });
-    this.materials = { mushroom: make('mushroom'), banana: make('banana'), shell: make('shell') };
-    this.materialList = [this.materials.mushroom, this.materials.banana, this.materials.shell];
+    this.materials = { mushroom: make('mushroom'), banana: make('banana'), shell: make('shell'), goldenMushroom: make('goldenMushroom'), tripleBanana: make('tripleBanana') };
+    this.materialList = Object.values(this.materials);
     for (let i = 0; i < count; i++) {
       const sprite = new THREE.Sprite(this.materials.mushroom);
       sprite.scale.setScalar(MARKER_SCALE);
