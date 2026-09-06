@@ -1,6 +1,8 @@
+import { buildSamples, SAMPLE_COUNT } from './TrackSampler';
 import * as THREE from 'three';
-import { CONTROL_POINTS, ROAD_HALF, GRASS_HALF, CHECKPOINT_COUNT, SURFACE_ZONES, type SurfaceZone } from './trackData';
-import { buildAsphaltTexture, buildGrassTexture, tryLoadTextureOverride } from '../render/textures';
+import { ROAD_HALF, GRASS_HALF, CHECKPOINT_COUNT, type SurfaceZone } from './trackData';
+import type { MapDef, MapStyle } from './maps';
+import { buildAsphaltTexture, buildGrassTexture, buildRainbowTexture, tryLoadTextureOverride } from '../render/textures';
 // §v3 Track A: prop planting has to agree with the ground heightfield's own
 // clamp, so the two constants live in Environment and are imported here rather
 // than duplicated (no runtime cycle: Environment's only TrackBuilder import is
@@ -27,8 +29,6 @@ export interface TrackData {
   group: THREE.Group;
 }
 
-const SAMPLE_COUNT = 600; // §Phase 4 item 5: ~1001m / 600 samples =~ 1.67m spacing
-const RAW_SAMPLE_COUNT = 2000;
 const STRIPE_WIDTH = 0.4;
 const WALL_HEIGHT = 1.2;
 const TEXTURE_V_SCALE = 8; // meters of arc length per texture repeat, longitudinally (§Phase 4 item 1)
@@ -41,85 +41,6 @@ const TEXTURE_V_SCALE = 8; // meters of arc length per texture repeat, longitudi
 // every elevation. It only has to out-reach GROUND_SINK (0.25m) plus whatever
 // the coarse 6m terrain cells undershoot by; 3m is generous headroom.
 const SKIRT_DEPTH = 3;
-
-const UP = new THREE.Vector3(0, 1, 0);
-const MAX_SAMPLE_GRADE = 0.12; // §Phase 5 item 1: dev-time budget for adjacent-sample |dy/ds|
-
-function findIndexForS(cum: number[], targetS: number): number {
-  let lo = 0;
-  let hi = cum.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (cum[mid] < targetS) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
-function buildSamples(): { samples: TrackSample[]; totalLength: number } {
-  const curve = new THREE.CatmullRomCurve3(CONTROL_POINTS, true, 'centripetal');
-  const raw = curve.getPoints(RAW_SAMPLE_COUNT);
-
-  const cum: number[] = [0];
-  for (let i = 1; i < raw.length; i++) {
-    cum.push(cum[i - 1] + raw[i].distanceTo(raw[i - 1]));
-  }
-  const totalLength = cum[cum.length - 1];
-
-  const samples: TrackSample[] = [];
-  for (let i = 0; i < SAMPLE_COUNT; i++) {
-    const targetS = (i / SAMPLE_COUNT) * totalLength;
-    const idx = findIndexForS(cum, targetS);
-    samples.push({ pos: raw[idx].clone(), s: targetS, forward: new THREE.Vector3(), right: new THREE.Vector3(), grade: 0 });
-  }
-
-  // forward/right computed from neighbor samples once all positions are known.
-  // NOTE: our kart heading convention is forward = (sin(h), 0, cos(h)) (see
-  // physics/Kart.ts kartForward), for which "driver's right" is up x forward
-  // (not forward x up as it would be for a forward = (0,0,-1)-at-rest convention).
-  // §Phase 5 item 2: `forward` is taken from the full 3D neighbor positions
-  // (so it carries the local grade), but `right` is explicitly built from
-  // forward's *horizontal* projection so it stays perfectly level (no
-  // banking, out of scope) regardless of slope -- banking would otherwise
-  // creep in because UP x forward's magnitude depends on forward's pitch even
-  // though its direction happens to already be horizontal.
-  for (let i = 0; i < SAMPLE_COUNT; i++) {
-    const prev = samples[(i - 1 + SAMPLE_COUNT) % SAMPLE_COUNT].pos;
-    const next = samples[(i + 1) % SAMPLE_COUNT].pos;
-    const forward = next.clone().sub(prev).normalize();
-    const horizontalForward = new THREE.Vector3(forward.x, 0, forward.z).normalize();
-    samples[i].forward = forward;
-    samples[i].right = UP.clone().cross(horizontalForward).normalize();
-    samples[i].grade = forward.y;
-  }
-
-  checkGradeSafety(samples, totalLength);
-
-  return { samples, totalLength };
-}
-
-// §Phase 5 item 1: a cheap one-time startup sanity check on the authored
-// heights -- warns (doesn't throw) if the Catmull-Rom-smoothed per-sample
-// slope ever exceeds the ~10% grade budget by a meaningful margin, catching
-// an over-steep control-point edit before it ships. Runs unconditionally
-// (it's O(n) over the sample count, once, at track build time -- not worth
-// gating behind a dev-only flag). Wrap-aware at the start/finish seam.
-function checkGradeSafety(samples: TrackSample[], totalLength: number) {
-  const n = samples.length;
-  for (let i = 0; i < n; i++) {
-    const a = samples[i];
-    const b = samples[(i + 1) % n];
-    const dy = b.pos.y - a.pos.y;
-    let ds = b.s - a.s;
-    if (ds <= 0) ds += totalLength; // wrap at the seam (n-1 -> 0)
-    const grade = ds > 0 ? Math.abs(dy / ds) : 0;
-    if (grade > MAX_SAMPLE_GRADE) {
-      console.warn(
-        `[trackData] adjacent-sample grade ${grade.toFixed(3)} exceeds ${MAX_SAMPLE_GRADE} budget near s=${a.s.toFixed(1)}m`,
-      );
-    }
-  }
-}
 
 // u = signed lateral offset in meters / TEXTURE_V_SCALE; v = arc length /
 // TEXTURE_V_SCALE. §Phase 4 finding #5: u used to span the fixed range 0..1
@@ -139,7 +60,18 @@ const U_STRIPE_L = -(ROAD_HALF - STRIPE_WIDTH) / TEXTURE_V_SCALE;
 const U_STRIPE_R = (ROAD_HALF - STRIPE_WIDTH) / TEXTURE_V_SCALE;
 const U_EDGE_R = ROAD_HALF / TEXTURE_V_SCALE;
 
-function buildRoadMesh(samples: TrackSample[], totalLength: number): THREE.Mesh {
+// §v4: the space style maps u across the cross-section 0..1 instead of by
+// meters, so one hue sweep of the rainbow texture spans the road exactly once
+// (see buildRainbowTexture's ClampToEdge note). The meters-based mapping the
+// meadow style uses is deliberate for a *tiling* asphalt texture — it keeps
+// texel density equal in u and v (§Phase 4 finding #5) — but a gradient that
+// is meant to fit the road once needs the normalized mapping instead.
+const U_SPACE_EDGE_L = 0;
+const U_SPACE_STRIPE_L = STRIPE_WIDTH / (2 * ROAD_HALF);
+const U_SPACE_STRIPE_R = 1 - STRIPE_WIDTH / (2 * ROAD_HALF);
+const U_SPACE_EDGE_R = 1;
+
+function buildRoadMesh(samples: TrackSample[], totalLength: number, style: MapStyle): THREE.Mesh {
   const n = samples.length;
   const ringCount = n + 1;
   const positions: number[] = [];
@@ -150,13 +82,17 @@ function buildRoadMesh(samples: TrackSample[], totalLength: number): THREE.Mesh 
   const stripeColor = new THREE.Color(0xf2f2f2);
   const lightGray = new THREE.Color(0x707070);
   const darkGray = new THREE.Color(0x5c5c5c);
+  // Space: the rainbow texture carries all the colour, so the vertex colours
+  // have to be neutral or they would tint it. (They stay in the attribute
+  // rather than dropping vertexColors so both styles share one geometry path.)
+  const spaceWhite = new THREE.Color(0xffffff);
 
   // 4 cross-section vertices per ring: edgeL, stripeL, stripeR, edgeR.
   for (let i = 0; i < ringCount; i++) {
     const sampleIdx = i % n;
     const { pos, right } = samples[sampleIdx];
     const sValue = i < n ? samples[sampleIdx].s : totalLength;
-    const v = sValue / TEXTURE_V_SCALE;
+    const v = style === 'space' ? sValue / (2 * ROAD_HALF) : sValue / TEXTURE_V_SCALE;
     const roadColor = Math.floor(sampleIdx / 4) % 2 === 0 ? lightGray : darkGray;
 
     const edgeL = pos.clone().addScaledVector(right, -ROAD_HALF);
@@ -167,13 +103,18 @@ function buildRoadMesh(samples: TrackSample[], totalLength: number): THREE.Mesh 
     for (const vtx of [edgeL, stripeL, stripeR, edgeR]) {
       positions.push(vtx.x, vtx.y + 0.001, vtx.z);
     }
-    colors.push(
-      stripeColor.r, stripeColor.g, stripeColor.b,
-      roadColor.r, roadColor.g, roadColor.b,
-      roadColor.r, roadColor.g, roadColor.b,
-      stripeColor.r, stripeColor.g, stripeColor.b,
-    );
-    uvs.push(U_EDGE_L, v, U_STRIPE_L, v, U_STRIPE_R, v, U_EDGE_R, v);
+    if (style === 'space') {
+      for (let k = 0; k < 4; k++) colors.push(spaceWhite.r, spaceWhite.g, spaceWhite.b);
+      uvs.push(U_SPACE_EDGE_L, v, U_SPACE_STRIPE_L, v, U_SPACE_STRIPE_R, v, U_SPACE_EDGE_R, v);
+    } else {
+      colors.push(
+        stripeColor.r, stripeColor.g, stripeColor.b,
+        roadColor.r, roadColor.g, roadColor.b,
+        roadColor.r, roadColor.g, roadColor.b,
+        stripeColor.r, stripeColor.g, stripeColor.b,
+      );
+      uvs.push(U_EDGE_L, v, U_STRIPE_L, v, U_STRIPE_R, v, U_EDGE_R, v);
+    }
   }
 
   for (let i = 0; i < n; i++) {
@@ -196,6 +137,27 @@ function buildRoadMesh(samples: TrackSample[], totalLength: number): THREE.Mesh 
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
+  if (style === 'space') {
+    // Lambert rather than unlit, deliberately: an unlit ribbon would glow
+    // evenly and the karts would then cast no shadow onto anything at all,
+    // which is what makes them look pasted on. This keeps real shading and
+    // real kart shadows, with a small emissive floor so the rainbow never
+    // falls to black on the shadowed side of a crest. The *rails* and the
+    // void shoulder are the unlit pieces (see buildWallMeshes/buildGrassMesh).
+    const rainbowTexture = buildRainbowTexture();
+    const mesh = new THREE.Mesh(
+      geometry,
+      new THREE.MeshLambertMaterial({
+        vertexColors: true,
+        map: rainbowTexture,
+        emissiveMap: rainbowTexture,
+        emissive: 0xffffff,
+        emissiveIntensity: 0.48,
+      }),
+    );
+    mesh.receiveShadow = true;
+    return mesh;
+  }
   const material = new THREE.MeshLambertMaterial({ vertexColors: true, map: buildAsphaltTexture() });
   tryLoadTextureOverride('/assets/textures/asphalt.jpg', material);
   const mesh = new THREE.Mesh(geometry, material);
@@ -211,7 +173,10 @@ const U_INNER_L = -ROAD_HALF / TEXTURE_V_SCALE;
 const U_INNER_R = ROAD_HALF / TEXTURE_V_SCALE;
 const U_OUTER_R = GRASS_HALF / TEXTURE_V_SCALE;
 
-function buildGrassMesh(samples: TrackSample[], totalLength: number): THREE.Mesh {
+// §v4: the same ribbon serves as grass on the meadow map and as the dark
+// "void shoulder" on the space map — same geometry, same off-road physics
+// (|lateral| > ROAD_HALF), different clothes.
+function buildGrassMesh(samples: TrackSample[], totalLength: number, style: MapStyle): THREE.Mesh {
   const n = samples.length;
   const ringCount = n + 1;
   const positions: number[] = [];
@@ -220,13 +185,17 @@ function buildGrassMesh(samples: TrackSample[], totalLength: number): THREE.Mesh
   const indices: number[] = [];
 
   const baseGreen = new THREE.Color(0x5cb85c);
+  // Space: a violet shoulder right at the road edge falling away to near-black
+  // at the rail, so running wide reads as drifting off into the void.
+  const shoulderInner = new THREE.Color(0x3a1b5c);
+  const shoulderOuter = new THREE.Color(0x0d0718);
 
   // Two ribbons (left ROAD_HALF..GRASS_HALF, right ROAD_HALF..GRASS_HALF), 4 verts per ring.
   for (let i = 0; i < ringCount; i++) {
     const sampleIdx = i % n;
     const { pos, right } = samples[sampleIdx];
     const sValue = i < n ? samples[sampleIdx].s : totalLength;
-    const v = sValue / TEXTURE_V_SCALE;
+    const v = style === 'space' ? sValue / (2 * ROAD_HALF) : sValue / TEXTURE_V_SCALE;
     const jitter = () => 0.9 + Math.random() * 0.2;
 
     const innerL = pos.clone().addScaledVector(right, -ROAD_HALF);
@@ -237,9 +206,16 @@ function buildGrassMesh(samples: TrackSample[], totalLength: number): THREE.Mesh
     for (const vtx of [outerL, innerL, innerR, outerR]) {
       positions.push(vtx.x, vtx.y, vtx.z);
     }
-    for (let k = 0; k < 4; k++) {
-      const j = jitter();
-      colors.push(baseGreen.r * j, baseGreen.g * j, baseGreen.b * j);
+    if (style === 'space') {
+      // Vertex order is outerL, innerL, innerR, outerR.
+      for (const c of [shoulderOuter, shoulderInner, shoulderInner, shoulderOuter]) {
+        colors.push(c.r, c.g, c.b);
+      }
+    } else {
+      for (let k = 0; k < 4; k++) {
+        const j = jitter();
+        colors.push(baseGreen.r * j, baseGreen.g * j, baseGreen.b * j);
+      }
     }
     uvs.push(U_OUTER_L, v, U_INNER_L, v, U_INNER_R, v, U_OUTER_R, v);
   }
@@ -264,6 +240,9 @@ function buildGrassMesh(samples: TrackSample[], totalLength: number): THREE.Mesh
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
+  if (style === 'space') {
+    return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true }));
+  }
   const material = new THREE.MeshLambertMaterial({ vertexColors: true, map: buildGrassTexture() });
   tryLoadTextureOverride('/assets/textures/grass.jpg', material);
   const mesh = new THREE.Mesh(geometry, material);
@@ -271,7 +250,7 @@ function buildGrassMesh(samples: TrackSample[], totalLength: number): THREE.Mesh
   return mesh;
 }
 
-function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
+function buildWallMeshes(samples: TrackSample[], style: MapStyle): THREE.Mesh {
   const n = samples.length;
   const positions: number[] = [];
   const colors: number[] = [];
@@ -279,6 +258,9 @@ function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
 
   const red = new THREE.Color(0xcc2b2b);
   const white = new THREE.Color(0xf0f0f0);
+  // Space: neon rails, the only thing between the ribbon and the void.
+  const neonA = new THREE.Color(0x22e0ff);
+  const neonB = new THREE.Color(0xff5ce1);
 
   function addWallStrip(side: 1 | -1, vertexOffset: number) {
     for (let i = 0; i < n; i++) {
@@ -286,7 +268,14 @@ function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
       const base = pos.clone().addScaledVector(right, side * GRASS_HALF);
       const top = base.clone().add(new THREE.Vector3(0, WALL_HEIGHT, 0));
       positions.push(base.x, base.y, base.z, top.x, top.y, top.z);
-      const stripeColor = Math.floor(i / 2) % 2 === 0 ? red : white;
+      const stripeColor =
+        style === 'space'
+          ? Math.floor(i / 3) % 2 === 0
+            ? neonA
+            : neonB
+          : Math.floor(i / 2) % 2 === 0
+            ? red
+            : white;
       colors.push(stripeColor.r, stripeColor.g, stripeColor.b, stripeColor.r, stripeColor.g, stripeColor.b);
     }
     for (let i = 0; i < n; i++) {
@@ -307,7 +296,11 @@ function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
-  return new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  const material =
+    style === 'space'
+      ? new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
+      : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  return new THREE.Mesh(geometry, material);
 }
 
 // §Phase 5 elevation review fix #2: on graded (hilly) sections, the grass
@@ -319,19 +312,28 @@ function buildWallMeshes(samples: TrackSample[]): THREE.Mesh {
 // §v3 Track A: the drop is now relative to the local grass edge height
 // (SKIRT_DEPTH below it) rather than down to an absolute y — see SKIRT_DEPTH.
 const skirtColor = new THREE.Color(0x3f5c34); // earthy brown-green, darker than the grass ribbon's 0x5cb85c
+// §v4: on the space map the skirt has a different job — there is no terrain to
+// seal against, so it is what gives the floating ribbon visible *thickness*
+// when you look at it side-on from a crest. Shorter, and near-black so it
+// reads as the underside of the track rather than as more track.
+const spaceSkirtColor = new THREE.Color(0x140b22);
+const SPACE_SKIRT_DEPTH = 1.6;
 
-function buildGroundSkirtMesh(samples: TrackSample[]): THREE.Mesh {
+function buildGroundSkirtMesh(samples: TrackSample[], style: MapStyle): THREE.Mesh {
   const n = samples.length;
   const positions: number[] = [];
   const colors: number[] = [];
   const indices: number[] = [];
 
+  const depth = style === 'space' ? SPACE_SKIRT_DEPTH : SKIRT_DEPTH;
+  const color = style === 'space' ? spaceSkirtColor : skirtColor;
+
   function addSkirtStrip(side: 1 | -1, vertexOffset: number) {
     for (let i = 0; i < n; i++) {
       const { pos, right } = samples[i];
       const top = pos.clone().addScaledVector(right, side * GRASS_HALF);
-      positions.push(top.x, top.y, top.z, top.x, top.y - SKIRT_DEPTH, top.z);
-      colors.push(skirtColor.r, skirtColor.g, skirtColor.b, skirtColor.r, skirtColor.g, skirtColor.b);
+      positions.push(top.x, top.y, top.z, top.x, top.y - depth, top.z);
+      colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
     }
     for (let i = 0; i < n; i++) {
       const a = vertexOffset + i * 2;
@@ -446,10 +448,15 @@ function propGroundY(samples: TrackSample[], x: number, z: number, fallbackY: nu
   return lowest - GROUND_SINK;
 }
 
-function buildTracksideProps(samples: TrackSample[]): THREE.Group {
+// §v4: on the space map everything that grows out of the ground is skipped
+// (there is no ground) — only the floating ring gates survive, recoloured as
+// neon hoops.
+function buildTracksideProps(samples: TrackSample[], style: MapStyle): THREE.Group {
   const group = new THREE.Group();
   const n = samples.length;
   const isNearStart = (i: number) => Math.min(i, n - i) < START_CLEARANCE_SAMPLES;
+  const space = style === 'space';
+  if (space) return buildRingGates(samples, group, space);
 
   // Trees: trunk + cone top, alternating sides, every ~23m. Stride retuned
   // for the §Phase 4 item 5 layout's ~1.67m sample spacing (was ~1.55m/sample).
@@ -504,16 +511,26 @@ function buildTracksideProps(samples: TrackSample[]): THREE.Group {
   coneMesh.instanceMatrix.needsUpdate = true;
   group.add(coneMesh);
 
-  // Floating ring gates: centered on the road, spanning it like a hoop, every
-  // ~77m. Stride retuned for the §Phase 4 item 5 layout's ~1.67m sample spacing.
+  return buildRingGates(samples, group, space);
+}
+
+// Floating ring gates: centered on the road, spanning it like a hoop, every
+// ~77m. Stride retuned for the §Phase 4 item 5 layout's ~1.67m sample spacing.
+// §v4: these are the one trackside prop both styles share — a lit yellow hoop
+// on the meadow map, an unlit magenta one on the space map.
+function buildRingGates(samples: TrackSample[], group: THREE.Group, space: boolean): THREE.Group {
+  const n = samples.length;
   const ringIndices: number[] = [];
   for (let i = 0; i < n; i += 46) ringIndices.push(i);
 
   const ringGeo = new THREE.TorusGeometry(2.2, 0.22, 8, 16);
-  const ringMat = new THREE.MeshLambertMaterial({ color: 0xffd23f });
+  const ringMat = space
+    ? new THREE.MeshBasicMaterial({ color: 0xff77e0 })
+    : new THREE.MeshLambertMaterial({ color: 0xffd23f });
   const ringMesh = new THREE.InstancedMesh(ringGeo, ringMat, ringIndices.length);
   const ringAxis = new THREE.Vector3(0, 0, 1); // TorusGeometry's hole runs along local Z
   const quat = new THREE.Quaternion();
+  const m = new THREE.Matrix4();
   ringIndices.forEach((idx, i) => {
     const sample = samples[idx];
     const pos = sample.pos.clone().add(new THREE.Vector3(0, 3, 0));
@@ -623,9 +640,13 @@ function buildSandPatchVisual(samples: TrackSample[], totalLength: number, zone:
   return new THREE.Mesh(geometry, sandPatchMaterial);
 }
 
-function buildSurfaceZoneVisuals(samples: TrackSample[], totalLength: number): THREE.Group {
+function buildSurfaceZoneVisuals(
+  samples: TrackSample[],
+  totalLength: number,
+  zones: readonly SurfaceZone[],
+): THREE.Group {
   const group = new THREE.Group();
-  for (const zone of SURFACE_ZONES) {
+  for (const zone of zones) {
     if (zone.sStart > zone.sEnd) continue; // wrap-across-seam zones: physics only, no authored visual yet
     if (zone.type === 'boost') group.add(buildBoostPadVisual(samples, totalLength, zone));
     else group.add(buildSandPatchVisual(samples, totalLength, zone));
@@ -771,8 +792,9 @@ function buildSetPieces(samples: TrackSample[], totalLength: number): THREE.Grou
   return group;
 }
 
-export function buildTrack(): TrackData {
-  const { samples, totalLength } = buildSamples();
+export function buildTrack(map: MapDef): TrackData {
+  const { samples, totalLength } = buildSamples(map.controlPoints);
+  const style = map.style;
 
   const checkpoints: number[] = [];
   for (let i = 0; i < CHECKPOINT_COUNT; i++) {
@@ -792,14 +814,16 @@ export function buildTrack(): TrackData {
   checkWrapGuardSafety(minCheckpointGap);
 
   const group = new THREE.Group();
-  group.add(buildRoadMesh(samples, totalLength));
-  group.add(buildGrassMesh(samples, totalLength));
-  group.add(buildGroundSkirtMesh(samples));
-  group.add(buildWallMeshes(samples));
+  group.add(buildRoadMesh(samples, totalLength, style));
+  group.add(buildGrassMesh(samples, totalLength, style));
+  group.add(buildGroundSkirtMesh(samples, style));
+  group.add(buildWallMeshes(samples, style));
   group.add(buildStartFinish(samples[checkpoints[0]]));
-  group.add(buildTracksideProps(samples));
-  group.add(buildSurfaceZoneVisuals(samples, totalLength));
-  group.add(buildSetPieces(samples, totalLength));
+  group.add(buildTracksideProps(samples, style));
+  group.add(buildSurfaceZoneVisuals(samples, totalLength, map.surfaceZones));
+  // Grandstands, arch banners and warp pipes are all planted on terrain that
+  // only the meadow map has (§v4).
+  if (style !== 'space') group.add(buildSetPieces(samples, totalLength));
 
   return { samples, totalLength, checkpoints, group };
 }

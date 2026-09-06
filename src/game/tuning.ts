@@ -14,9 +14,9 @@ export const TUNING = {
   steerYawRateAtTop: 1.1, // rad/s at topSpeed (lerp by speed/topSpeed)
   steerRamp: 12, // how fast actual steer chases input (1/s, exponential damp)
   driftMinSpeed: 12, // below this, drift won't start / cancels
-  driftYawBonus: 1.35, // x yaw rate toward drift dir
+  driftYawBonus: 1.28, // x yaw rate toward drift dir (§v3 polish: eased from 1.35 — the *bonus* over plain steering drops ~20%, so a drift still rotates the kart faster, just less violently)
   driftCounterRange: 0.5, // steering inside drift maps to [dir*(1+-this)] of drift yaw
-  driftLateralSlip: 6, // m/s outward slip while drifting (decays after)
+  driftLateralSlip: 5, // m/s outward slip while drifting (decays after) (§v3 polish: eased from 6 — a bit less sideways skate, so a drift holds closer to the line it's pointed at)
   driftTierTimes: [0.8, 1.6, 2.6], // sec held -> tier 1/2/3
   boostDurations: [0.7, 1.2, 1.8], // sec per tier
   boostSpeedMult: 1.35, // boost target = topSpeed x this

@@ -34,15 +34,11 @@ import {
   taperedBox,
 } from './PartAssembler';
 
-// Sphere budgets: a sphere costs wSeg * (hSeg*2 - 2) triangles, so these are
-// the difference between a 1.5k and a 4k driver. Only the head (the thing you
-// actually look at) gets the round one.
-// (dialled down once from 12x10/10x8/8x6/6x5 after measuring — Bowser came out
-// at 3.1k tris, over the ~2.5k per kart+driver budget in §Track B item 5.)
-const HEAD_W = 10, HEAD_H = 8; // 140 tris — heads, torsos, the mushroom cap
-const BODY_W = 8, BODY_H = 6; //   80 tris — snouts, bellies, secondary masses
-const SMALL_W = 8, SMALL_H = 5; //  64 tris — eyes, hands, shoulders
-const TINY_W = 6, TINY_H = 4; //    36 tris — pupils, nostrils, gems
+// Smooth silhouettes at chase-camera distance; colour buckets remain merged.
+const HEAD_W = 20, HEAD_H = 14;
+const BODY_W = 14, BODY_H = 10;
+const SMALL_W = 12, SMALL_H = 8;
+const TINY_W = 10, TINY_H = 6;
 
 const EYE_WHITE = 0xfbfbfb;
 const PUPIL = 0x2a2320;
@@ -82,10 +78,12 @@ type Palette =
   // It gets its own bucket because no other palette slot is anywhere near
   // blue; the bucket only materialises for the princess, so it costs one
   // extra draw call on exactly one kart.
-  | 'gem';
+  | 'gem'
+  | 'iris';
 
 function paletteFor(d: DriverStyle): Record<Palette, { color: number; tint?: boolean; flat?: boolean }> {
   return {
+    iris: { color: 0x287fba },
     skin: { color: d.skin },
     shirt: { color: d.shirt },
     overalls: { color: d.overalls },
@@ -119,6 +117,8 @@ function addEyes(
       'eye',
       sphere(o.r, SMALL_W, SMALL_H).scale(o.sx ?? 0.85, o.sy ?? 1.25, o.sz ?? 0.7).translate(s * o.x, o.y, o.z),
     );
+    parts.add('iris', sphere(o.pupilR * 1.5, SMALL_W, SMALL_H).scale(1, 1.1, 0.45).translate(s * o.x, o.y, o.z + o.r * (o.sz ?? 0.7) + out - o.pupilR * 0.25));
+    parts.add('eye', sphere(o.pupilR * 0.28, TINY_W, TINY_H).translate(s * o.x - o.pupilR * 0.2, o.y + o.pupilR * 0.35, o.z + o.r * (o.sz ?? 0.7) + out + o.pupilR * 0.55));
     parts.add(
       'pupil',
       sphere(o.pupilR, TINY_W, TINY_H).translate(s * o.x, o.y, o.z + o.r * (o.sz ?? 0.7) + out - o.pupilR * 0.5),
@@ -164,7 +164,7 @@ function buildPlumber(parts: Parts, arms: Parts, def: CharacterDef) {
   }
 
   // torso: shirt with the overalls bib + straps over it
-  parts.add('shirt', box(bodyW, torsoH, 0.31).translate(0, torsoY, 0.01));
+  parts.add('shirt', sphere(1, HEAD_W, HEAD_H).scale(bodyW * 0.55, torsoH * 0.66, 0.18).translate(0, torsoY, 0.01));
   parts.add('overalls', box(bodyW * 1.02, 0.16, 0.32).translate(0, hipTop + 0.07, 0.01));
   parts.add('overalls', box(bodyW * 0.58, torsoH * 0.62, 0.06).translate(0, torsoY + 0.02, 0.15));
   for (const s of [-1, 1]) {

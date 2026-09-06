@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { MapStyle } from '../track/maps';
 import { clamp, damp } from '../../shared/mathUtils';
 import { TUNING } from '../tuning';
 import type { KartState } from '../physics/Kart';
@@ -59,9 +60,19 @@ export const SHADOW_LIGHT_OFFSET = new THREE.Vector3(40, 70, 30);
 const SHADOW_HALF_SIZE = 40; // ~80x80m ortho shadow camera, the solo/default extent (§Phase 4 item 3)
 const SHADOW_HALF_SIZE_MAX = 90; // widest the ortho box is allowed to grow to cover a spread-out split-screen pair (§Phase 4 finding #3)
 
-export function buildLights(scene: THREE.Scene): Lights {
-  scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x4a6b3a, 1.2));
-  const dir = new THREE.DirectionalLight(0xfff3d6, 0.9);
+// §v4: `style` picks the lighting rig. The space map is lit far more coolly
+// and from a dimmer key, so the rainbow ribbon (which carries its own colour
+// and a small emissive floor) is the brightest thing on screen rather than
+// competing with a daylight sun. The shadow rig itself is identical in both —
+// the karts still cast onto the road.
+export function buildLights(scene: THREE.Scene, style: MapStyle = 'meadow'): Lights {
+  const space = style === 'space';
+  scene.add(
+    space
+      ? new THREE.HemisphereLight(0x8899ff, 0x2a1245, 0.85)
+      : new THREE.HemisphereLight(0xbfe3ff, 0x4a6b3a, 1.2),
+  );
+  const dir = space ? new THREE.DirectionalLight(0xdfe6ff, 0.75) : new THREE.DirectionalLight(0xfff3d6, 0.9);
   dir.castShadow = true;
   dir.shadow.mapSize.set(TUNING.shadowMapSize, TUNING.shadowMapSize);
   dir.shadow.camera.left = -SHADOW_HALF_SIZE;
@@ -189,6 +200,7 @@ export function setKartCharacter(visual: KartVisual, def: CharacterDef) {
   // The new body starts level; the smoothed lean/pitch state carries over so
   // re-picking mid-drift doesn't pop.
   visual.body.rotation.z = visual.leanAngle;
+
 }
 
 // §Phase 3: sets (or clears) the driver mounted on `visual.driverAnchor` — the
@@ -324,9 +336,13 @@ export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number
     );
   }
 
-  const targetLean = kart.drift.phase === 'active' ? kart.drift.dir * 0.25 : 0;
+  // §v3 polish: 0.25 -> 0.21 rad, matching the eased driftYawBonus/lateral
+  // slip in TUNING — the body still visibly rolls into a drift, just less.
+  const targetLean = kart.drift.phase === 'active' ? kart.drift.dir * 0.21 : 0;
   visual.leanAngle = damp(visual.leanAngle, targetLean, LEAN_BLEND_RATE, dt);
   visual.body.rotation.z = visual.leanAngle;
+  visual.driverAnchor.rotation.z = damp(visual.driverAnchor.rotation.z, -kart.steerActual * 0.09, 7, dt);
+  visual.driverAnchor.rotation.x = damp(visual.driverAnchor.rotation.x, kart.boostTimer > 0 ? 0.10 : 0, 9, dt);
 
   const targetPitch = -Math.asin(clamp(grade, -1, 1));
   visual.pitchAngle = damp(visual.pitchAngle, targetPitch, PITCH_BLEND_RATE, dt);
@@ -352,35 +368,58 @@ export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number
 // The ItemSystem state machine (box.active/respawnTimer) is unchanged — main.ts
 // derives the animation purely from watching `active` flip.
 export function buildItemBoxMesh(): THREE.Mesh {
-  const geo = new THREE.BoxGeometry(1, 1, 1);
-  const faceColors = [0xe74c3c, 0x3498db, 0xf1c40f, 0x2ecc71, 0xe67e22, 0x9b59b6];
-  const colors: number[] = [];
-  const c = new THREE.Color();
-  for (let face = 0; face < 6; face++) {
-    c.set(faceColors[face]);
-    for (let v = 0; v < 4; v++) colors.push(c.r, c.g, c.b);
-  }
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true }));
-  mesh.position.y = 0.6;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  const gradient = ctx.createLinearGradient(0, 0, 128, 128);
+  gradient.addColorStop(0, '#7affed'); gradient.addColorStop(0.45, '#a6a0ff'); gradient.addColorStop(1, '#ffb8ef');
+  ctx.fillStyle = gradient; ctx.fillRect(0, 0, 128, 128);
+  ctx.strokeStyle = '#f1ffff'; ctx.lineWidth = 7; ctx.strokeRect(5, 5, 118, 118);
+  ctx.font = 'bold 94px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = 8; ctx.strokeStyle = '#4c358e'; ctx.strokeText('?', 64, 69);
+  ctx.fillStyle = '#ffffff'; ctx.fillText('?', 64, 69);
+  const map = new THREE.CanvasTexture(canvas); map.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshLambertMaterial({ map, emissiveMap: map, emissive: 0xffffff, emissiveIntensity: 0.3, transparent: true }));
+  mesh.position.y = 0.9;
   return mesh;
 }
 
 export function buildBananaMesh(): THREE.Mesh {
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.3, 8, 6),
-    new THREE.MeshLambertMaterial({ color: 0xf5d327 }),
-  );
-  mesh.scale.set(1.6, 0.55, 0.7);
-  mesh.position.y = 0.2;
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.14, 0.48, 10),
+    new THREE.MeshLambertMaterial({ color: 0xffda34 }));
+  for (let i = 0; i < 3; i++) {
+    const a = i * Math.PI * 2 / 3;
+    const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(0, 0.14, 0),
+      new THREE.Vector3(Math.cos(a) * 0.24, -0.34, Math.sin(a) * 0.24),
+      new THREE.Vector3(Math.cos(a) * 0.55, -0.13, Math.sin(a) * 0.55));
+    mesh.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 10, 0.085, 6, false),
+      new THREE.MeshLambertMaterial({ color: 0xffe34e })));
+  }
+  for (const x of [-0.042, 0.042]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.023, 8, 6), new THREE.MeshBasicMaterial({ color: 0x30251c }));
+    eye.position.set(x, 0.06, 0.105); eye.scale.y = 1.7; mesh.add(eye);
+  }
+  const stalk = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.065, 0.12, 8), new THREE.MeshLambertMaterial({ color: 0x866329 }));
+  stalk.position.y = 0.27; mesh.add(stalk);
   return mesh;
 }
 
 export function buildShellMesh(): THREE.Mesh {
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.35, 10, 8),
-    new THREE.MeshLambertMaterial({ color: 0x2ecc71 }),
-  );
-  mesh.position.y = 0.4;
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.38, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+    new THREE.MeshLambertMaterial({ color: 0x27c765 }));
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.35, 0.075, 8, 24), new THREE.MeshLambertMaterial({ color: 0xfff3cd }));
+  rim.rotation.x = Math.PI / 2; mesh.add(rim);
+  const underside = new THREE.Mesh(new THREE.CircleGeometry(0.35, 24), new THREE.MeshLambertMaterial({ color: 0x8b6332, side: THREE.DoubleSide }));
+  underside.rotation.x = Math.PI / 2; mesh.add(underside);
+  for (let i = 0; i < 6; i++) {
+    const a = i * Math.PI / 3;
+    const points: THREE.Vector3[] = [];
+    for (let j = 0; j <= 8; j++) {
+      const t = j / 8 * Math.PI / 2;
+      points.push(new THREE.Vector3(Math.sin(t) * Math.cos(a) * 0.384, Math.cos(t) * 0.384, Math.sin(t) * Math.sin(a) * 0.384));
+    }
+    mesh.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 8, 0.012, 4, false), new THREE.MeshLambertMaterial({ color: 0x14673b })));
+  }
   return mesh;
 }

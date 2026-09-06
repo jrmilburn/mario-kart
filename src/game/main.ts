@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ArcadeEffects } from './render/ArcadeEffects';
 import { CONTROLLER_ABSENT_MS, type EventName, type PlayerSlot } from '../shared/protocol';
 import { GameSocket } from './net/GameSocket';
 import { type ControlState } from './input/InputSource';
@@ -32,11 +33,14 @@ import {
   type BoostFlare,
 } from './render/ItemVisuals';
 import { buildEnvironment } from './render/Environment';
+import { CinematicCamera } from './render/CinematicCamera';
 import { CHARACTERS, CHARACTERS_BY_ID, type CharacterDef } from './characters/registry';
 import { loadCharacterModelInstance, preloadAll } from './characters/CharacterLoader';
 import { buildTrack } from './track/TrackBuilder';
 import { TrackQuery, sampleAtArcLength } from './track/TrackQuery';
 import { GRASS_HALF, ROAD_HALF } from './track/trackData';
+import { mapById } from './track/maps';
+import { getSession } from './session';
 import { TUNING } from './tuning';
 import { LapTracker, TOTAL_LAPS, createLapProgress, type LapProgress } from './race/LapTracker';
 import { RaceDirector } from './race/RaceDirector';
@@ -122,18 +126,27 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.shadowMap.autoUpdate = false;
 app.appendChild(renderer.domElement);
 
-const lights = buildLights(scene);
+// §v4: what the start menu chose (entry.ts wrote it before importing this
+// module — see session.ts for why that indirection exists). Everything below
+// is built for this map and this number of seats, once.
+const session = getSession();
+const activeMap = mapById(session.mapId);
+console.log(`[main] starting ${activeMap.name} (${activeMap.style}) in ${session.mode}-player mode`);
+
+const lights = buildLights(scene, activeMap.style);
 
 // §v3 Track A: the track (and its TrackQuery) must exist *before* the
 // environment now — buildEnvironment's ground is no longer a flat plane, it's
 // a heightfield draped over the circuit's own elevation, so it needs to query
 // track heights while it builds. scene.background/fog assignment inside
 // buildEnvironment is order-independent, so nothing else cares about the swap.
-const track = buildTrack();
+const track = buildTrack(activeMap);
 scene.add(track.group);
-const trackQuery = new TrackQuery(track.samples, track.totalLength);
+const trackQuery = new TrackQuery(track.samples, track.totalLength, activeMap.surfaceZones);
 
-buildEnvironment(scene, trackQuery); // §Phase 4 item 2: sky dome, mountains, clouds, fog, ground (§v3 Track A: terrain heightfield)
+// §Phase 4 item 2: sky dome, mountains, clouds, fog, ground (§v3 Track A:
+// terrain heightfield). §v4: or, on a 'space' map, a starfield and no ground at all.
+const environment = buildEnvironment(scene, trackQuery, activeMap.style);
 
 // Staggered 2-2-2 grid start (Phase 2b grows this from 1-2-2 to fit a second
 // human-capable kart), spaced so no pair starts closer than 2*kartRadius:
@@ -234,12 +247,23 @@ const entities: KartEntity[] = GRID.map((g, i) => {
 });
 const player = entities[0]; // P1's entity — shorthand kept for the shared/engine-audio bits that stay P1-only
 
+// §v3 polish (post-race showcase): autopilot brains for every kart, so the
+// field keeps circulating under the cinematic camera once the race is over.
+// Reuses each entity's own AiState where it has one — an AI kart keeps its
+// personality and lane preference — and adds one for entity 0, which is
+// human-only during a race and so carries none of its own.
+const showcaseAi: AiState[] = entities.map((e, i) => e.ai ?? createAiState(GRID[i].lane));
+
 // Phase 2b: one Player per controller slot, each owning its own input source,
 // keymap, and camera rig. P1 always drives entity 0; P2 drives entity 1 only
 // when active (see lockRoster) — otherwise entity 1 races as AI.
 const groundHeightAt = (pos: THREE.Vector3) => trackQuery.groundHeightAt(pos);
 const players: [Player, Player] = [createPlayer(0, 0, groundHeightAt), createPlayer(1, 1, groundHeightAt)];
 for (const p of players) p.inputSource.attachKeyboard();
+
+// §v3 polish: the post-race camera. Takes over the whole window in FINISHED
+// (see renderSplit below) and cuts between shot types until RESTART.
+const cinematic = new CinematicCamera(groundHeightAt);
 
 function entityFor(p: Player): KartEntity {
   return entities[p.entityIndex];
@@ -277,8 +301,12 @@ function staleActiveSlots(now: number): PlayerSlot[] {
 // CHARACTERS[] order, assigned to AI entities in ascending index order.
 // Recomputed fresh every countdown since lobby picks can change race to race.
 function lockRoster() {
-  const now = performance.now();
-  players[1].active = players[1].connected || players[1].inputSource.isKeyboardActive(now);
+  // §v4: the second seat exists because the player picked two-player mode on
+  // the start menu, not because a second phone happened to connect. That is
+  // what lets the lobby split the screen and show a QR per half before anyone
+  // has joined; canStart() below is what stops a race beginning with an empty
+  // seat.
+  players[1].active = session.mode === 'multi';
 
   const usedIds = new Set(players.filter((p) => p.active).map((p) => entityFor(p).characterId));
   const remaining = CHARACTERS.filter((c) => !usedIds.has(c.id));
@@ -291,10 +319,28 @@ function lockRoster() {
   });
 }
 
-// Split-screen (Phase 2c) mirrors the roster lock exactly: two active
-// players -> two half-screen viewports; one -> the original full-screen path.
+// §v4: split-screen is decided by the start menu, not by who has connected —
+// two-player mode splits immediately, in the lobby, so each half can hold its
+// own QR code for the phone that belongs to it (Phase 2c originally derived
+// this from the roster lock, which could only be known at countdown).
 function isSplit(): boolean {
-  return players[0].active && players[1].active;
+  return session.mode === 'multi';
+}
+
+// §v4: two-player mode can't start with an empty seat. A seat counts as filled
+// by a connected phone or by that player's keyboard (the arrow-key debug
+// fallback stays usable), matching what activeControllerAges treats as live.
+function canStart(): boolean {
+  if (session.mode !== 'multi') return true;
+  const now = performance.now();
+  return players.every((p) => p.connected || p.inputSource.isKeyboardActive(now));
+}
+
+// Whether the RENDERER is currently split, which is not the same question as
+// the roster's isSplit(): the post-race showcase (§v3 polish) takes the whole
+// window for one cinematic camera even when two humans raced.
+function renderSplit(): boolean {
+  return isSplit() && raceDirector.state !== 'FINISHED';
 }
 
 function applyCameraAspects(split: boolean) {
@@ -307,6 +353,10 @@ function applyCameraAspects(split: boolean) {
   }
   players[0].camera.updateProjectionMatrix();
   players[1].camera.updateProjectionMatrix();
+  // The cinematic camera is always full-window; it owns its own fov per shot,
+  // and re-commits this aspect on the next update either way.
+  cinematic.camera.aspect = window.innerWidth / window.innerHeight;
+  cinematic.camera.updateProjectionMatrix();
 }
 
 // Split-screen halves the GPU's effective resolution budget while doubling
@@ -331,7 +381,7 @@ const minimap = new Minimap(app, track.samples);
 const itemBoxes: ItemBoxState[] = createItemBoxes(track.samples);
 // §v3 Track C2: `baseY` is captured at build time because the bob animation
 // rewrites mesh.position.y every frame and would otherwise drift.
-const ITEM_BOX_BASE_HEIGHT = 0.6;
+const ITEM_BOX_BASE_HEIGHT = 0.95;
 const itemBoxVisuals = itemBoxes.map((box) => {
   const mesh = buildItemBoxMesh();
   mesh.position.copy(track.samples[box.sampleIdx].pos).add(new THREE.Vector3(0, ITEM_BOX_BASE_HEIGHT, 0));
@@ -361,6 +411,7 @@ const shellVisuals = new Map<Shell, THREE.Mesh>();
 // startup and never allocate afterwards (see render/ItemVisuals.ts).
 const heldItemMarkers = new HeldItemMarkers(scene, GRID.length);
 const spinStars = new SpinStars(scene, GRID.length);
+const arcadeEffects = new ArcadeEffects(scene);
 const shellTrail = new ItemTrail();
 scene.add(shellTrail.points);
 
@@ -425,9 +476,12 @@ function syncProjectileVisuals<T extends { pos: THREE.Vector3 }>(
       // every time a banana was picked up/evicted, a shell hit or timed out, or
       // resetRace() emptied both arrays. Nothing else references these — they
       // are built here and owned by this map — so disposing on removal is safe.
-      mesh.geometry.dispose();
-      if (Array.isArray(mesh.material)) mesh.material.forEach((m) => m.dispose());
-      else mesh.material.dispose();
+      mesh.traverse((part) => {
+        if (!(part instanceof THREE.Mesh)) return;
+        part.geometry.dispose();
+        const materials = Array.isArray(part.material) ? part.material : [part.material];
+        for (const material of materials) material.dispose();
+      });
       visuals.delete(obj);
     }
   }
@@ -488,7 +542,15 @@ function resetRace() {
   // moments after a mushroom widens the lobby/countdown view and eases back
   // over the next second (the kick decays exponentially and never snaps).
   for (const p of players) p.followCamera.resetFov();
+  // Covers each entity's own AiState too (showcaseAi reuses those objects) —
+  // the extra brain for entity 0 is the only one the loop above misses.
+  for (const ai of showcaseAi) {
+    ai.stuckTimer = 0;
+    ai.wallScrapeTimer = 0;
+    ai.driftHeld = false;
+  }
   shellTrail.clear();
+  arcadeEffects.clear();
   bananas.length = 0;
   shells.length = 0;
   finishCounter = 0;
@@ -519,7 +581,7 @@ function slotForEntity(e: KartEntity): PlayerSlot | null {
   return p ? p.slot : null;
 }
 
-window.addEventListener('resize', () => applyRendererSizing(isSplit()));
+window.addEventListener('resize', () => applyRendererSizing(renderSplit()));
 
 // --- Networking + input --------------------------------------------------
 
@@ -557,6 +619,14 @@ const raceDirector = new RaceDirector({
       players[1].active = false; // re-locked fresh by lockRoster() at the next countdown
     }
     if (state === 'COUNTDOWN') lockRoster();
+    if (state === 'FINISHED') {
+      // §v3 polish: the winner and whoever was actually driving get most of
+      // the screen time; the rest of the field still shows up between them.
+      const winner = [...entities].sort(comparePosition)[0];
+      const preferred = new Set<number>([entities.indexOf(winner)]);
+      for (const p of players) if (p.active) preferred.add(p.entityIndex);
+      cinematic.reset([...preferred]);
+    }
   },
 });
 
@@ -628,7 +698,7 @@ const socket = new GameSocket({
   onEvent: (name) => {
     // Either controller's start/restart is honored (Phase 2b) — the sender's
     // slot (server-stamped) doesn't gate these, both act on the shared race state.
-    if (name === 'start') raceDirector.requestStart();
+    if (name === 'start' && canStart()) raceDirector.requestStart();
     else if (name === 'restart') raceDirector.requestRestart();
   },
   onSelect: (characterId, slot) => trySelectCharacter(slot ?? 0, characterId),
@@ -636,7 +706,7 @@ const socket = new GameSocket({
 void socket;
 
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Enter') raceDirector.requestStart();
+  if (e.code === 'Enter' && canStart()) raceDirector.requestStart();
   if (e.code === 'KeyR') raceDirector.requestRestart();
   if (raceDirector.state === 'PAUSED') raceDirector.notifyInputRecovered(allActiveControllersFresh(performance.now()));
 });
@@ -644,7 +714,7 @@ window.addEventListener('keydown', (e) => {
 // --- Fixed-timestep physics + rAF render ----------------------------------
 
 let lastRenderTime = performance.now();
-let lastSplitState: boolean | null = null; // forces the first frame to apply sizing/layout
+let lastLayoutKey: string | null = null; // forces the first frame to apply sizing/layout
 const shadowMidpoint = new THREE.Vector3(); // reused each frame by the shadow-camera-follow block below
 
 startLoop(
@@ -655,6 +725,12 @@ startLoop(
     if (raceDirector.state === 'PAUSED') return; // physics frozen entirely
 
     const racing = raceDirector.state === 'RACING';
+    // §v3 polish: the post-race showcase. Physics keeps stepping and every
+    // kart drives itself (see the control selection below), which is what the
+    // cinematic camera is pointed at. Everything else gated on `racing` —
+    // pickups, item use, lap/finish bookkeeping, haptics — stays off, so the
+    // results standing behind the show can't change while it plays.
+    const showcase = raceDirector.state === 'FINISHED';
 
     // §v3 Track C1 review fix: every screen transition on the controller
     // (ui.ts's handleRaceEvent) dims the ITEM button, but a PAUSED->COUNTDOWN
@@ -694,13 +770,16 @@ startLoop(
       let control: ControlState;
       let topSpeedScale = 1;
 
-      if (!racing) {
+      if (!racing && !showcase) {
         control = NEUTRAL_CONTROL;
-      } else if (drivingPlayer) {
+      } else if (racing && drivingPlayer) {
         control = drivingPlayer.inputSource.sample(now);
-      } else if (e.ai) {
+      } else {
+        // Autopilot: the entity's own AiState during a race, and during the
+        // showcase that same brain for everyone — including the humans' karts,
+        // which have none of their own (§v3 polish, showcaseAi).
         const result = think(
-          e.ai,
+          showcaseAi[i],
           e.kart,
           preSample.s,
           preSample.lateral,
@@ -713,8 +792,6 @@ startLoop(
         );
         control = result.control;
         topSpeedScale = result.topSpeedScale;
-      } else {
-        control = NEUTRAL_CONTROL; // unreachable: every non-human entity carries an AiState
       }
 
       const surface = trackQuery.surfaceAt(preSample.s, preSample.lateral);
@@ -745,7 +822,8 @@ startLoop(
             targetIndex: findNextAhead(i),
             fireS: trackQuery.nearestSample(e.kart.pos).s,
           });
-          if (fired && firedType === 'mushroom') {
+          if (fired) arcadeEffects.burst(e.kart.pos, false);
+          if (fired && (firedType === 'mushroom' || firedType === 'goldenMushroom')) {
             // Squash-and-stretch on every mushroom (so opponents' boosts read
             // too), but the FOV kick only on the *firing* human's own camera —
             // lurching a split-screen opponent's view because you used an item
@@ -849,6 +927,7 @@ startLoop(
     const renderDt = Math.min((now - lastRenderTime) / 1000, 0.1);
     lastRenderTime = now;
     animClock += renderDt;
+    environment.update?.(animClock);
 
     for (const e of entities) updateKartVisual(e.visual, e.kart, renderDt, e.grade);
 
@@ -875,33 +954,53 @@ startLoop(
       );
     }
 
-    // Split-screen layout/sizing only needs to change when the roster lock
-    // (isSplit) actually flips — not recomputed every frame (§Phase 2c).
-    const split = isSplit();
-    if (split !== lastSplitState) {
-      lastSplitState = split;
+    // Layout/sizing only changes when the roster lock (isSplit) flips or the
+    // showcase takes over — not recomputed every frame (§Phase 2c). Keyed on a
+    // string rather than the old boolean because there are three states now:
+    // solo, split, and showcase (§v3 polish), and showcase and solo share the
+    // same renderer sizing but hide different HUD layers — a boolean would let
+    // 'showcase' -> 'solo' slip through as "no change" and strand both player
+    // HUDs hidden for the next race.
+    const showcase = raceDirector.state === 'FINISHED';
+    const split = isSplit() && !showcase;
+    const layoutKey = showcase ? 'showcase' : split ? 'split' : 'solo';
+    if (layoutKey !== lastLayoutKey) {
+      lastLayoutKey = layoutKey;
       applyRendererSizing(split);
       hud.setSplit(split);
-      playerHuds[0].setLayout(split ? 'left' : 'solo');
-      playerHuds[1].setLayout(split ? 'right' : 'hidden');
+      playerHuds[0].setLayout(showcase ? 'hidden' : split ? 'left' : 'solo');
+      playerHuds[1].setLayout(showcase || !split ? 'hidden' : 'right');
     }
 
+    // The follow cameras keep tracking their karts through the showcase even
+    // though nothing is rendering them: they damp toward their target, so
+    // leaving them frozen would make the first frame after RESTART a swoop.
     players[0].followCamera.update(entityFor(players[0]).kart, renderDt);
-    if (split) players[1].followCamera.update(entityFor(players[1]).kart, renderDt);
+    // isSplit() rather than `split`: P2's half exists from the lobby onward in
+    // two-player mode (and `split` is false during the showcase), and a camera
+    // that has never been updated would render its half from the world origin.
+    if (isSplit()) players[1].followCamera.update(entityFor(players[1]).kart, renderDt);
+    if (showcase) cinematic.update(entities, renderDt);
 
     // §Phase 4 item 3: shadow camera re-centers on the active players'
     // midpoint every frame (light keeps its fixed relative offset) so the
     // ortho shadow box always covers whoever's actually racing. Loop instead
     // of players.filter(...) to avoid an allocation every frame (§Phase 4
     // finding #4).
-    shadowMidpoint.set(0, 0, 0);
-    let activeShadowCount = 0;
-    for (const p of players) {
-      if (!p.active) continue;
-      shadowMidpoint.add(entityFor(p).kart.pos);
-      activeShadowCount++;
+    if (showcase) {
+      // §v3 polish: during the showcase the shadow box follows whichever kart
+      // the cinematic camera is on — the humans' karts may be nowhere near it.
+      shadowMidpoint.copy(entities[cinematic.subjectIndex].kart.pos);
+    } else {
+      shadowMidpoint.set(0, 0, 0);
+      let activeShadowCount = 0;
+      for (const p of players) {
+        if (!p.active) continue;
+        shadowMidpoint.add(entityFor(p).kart.pos);
+        activeShadowCount++;
+      }
+      shadowMidpoint.divideScalar(activeShadowCount || 1);
     }
-    shadowMidpoint.divideScalar(activeShadowCount || 1);
     updateLightTarget(lights.directional, shadowMidpoint);
     // §Phase 4 finding #3: a straight-line midpoint can leave one split
     // player outside a fixed-size ortho box when they're far apart, so the
@@ -943,11 +1042,14 @@ startLoop(
           anim.spawnTimer = ITEM_BOX_SPAWN_SECONDS;
           anim.popTimer = 0;
         } else {
+          arcadeEffects.burst(mesh.position);
           anim.popTimer = ITEM_BOX_POP_SECONDS;
           anim.spawnTimer = 0;
         }
       }
       mesh.rotation.y += renderDt * 1.5;
+      mesh.rotation.z = Math.sin(animClock * 1.7 + i) * 0.18;
+      mesh.rotation.x = Math.PI * 0.12;
 
       if (anim.popTimer > 0) {
         // Still playing the pickup pop: the box is logically gone but stays
@@ -1016,6 +1118,7 @@ startLoop(
       }
     }
     shellTrail.update(renderDt);
+    arcadeEffects.update(renderDt);
 
     const ranked = [...entities].sort(comparePosition);
     const maxTierTime = TUNING.driftTierTimes[TUNING.driftTierTimes.length - 1];
@@ -1105,7 +1208,7 @@ startLoop(
       renderer.render(scene, players[1].camera);
       renderer.setScissorTest(false);
     } else {
-      renderer.render(scene, players[0].camera);
+      renderer.render(scene, showcase ? cinematic.camera : players[0].camera);
     }
   },
 );
