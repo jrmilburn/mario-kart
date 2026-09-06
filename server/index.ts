@@ -6,6 +6,7 @@ import { networkInterfaces } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocket, WebSocketServer, type WebSocketServer as WSS } from 'ws';
+import { publicControllerUrl } from './controllerUrl';
 import {
   parseMessage,
   MAX_CONTROLLERS,
@@ -108,9 +109,12 @@ function pagePortFromRequest(req: IncomingMessage): number {
 }
 
 function buildJoinUrl(req: IncomingMessage, code: string): string {
-  if (PUBLIC_URL) {
-    return `${PUBLIC_URL.replace(/\/+$/, '')}/controller.html?room=${code}`;
-  }
+  const hostedUrl = publicControllerUrl(code, {
+    publicUrl: PUBLIC_URL,
+    railwayPublicDomain: process.env.RAILWAY_PUBLIC_DOMAIN,
+    requestOrigin: req.headers.origin,
+  });
+  if (hostedUrl) return hostedUrl;
   const lanIp = getLanIPv4();
   if (hasCerts) {
     return `https://${lanIp}:${HTTPS_PORT}/controller.html?room=${code}`;
