@@ -41,7 +41,14 @@ export const TUNING = {
   tiltMaxAngleDeg: 35,
   tiltDeadzoneDeg: 2.5,
   tiltSmoothing: 0.25,
-  splitPixelRatioCap: 1.5, // devicePixelRatio cap while split-screen is active (2x draw calls, §Phase 2c)
+  splitPixelRatioCap: 1.25, // devicePixelRatio cap while split-screen is active (2x draw calls, §Phase 2c); §v5: 1.5 -> 1.25 to leave frame budget for MediaPipe + bloom (High quality only — Low is always 1, render/Quality.ts)
   shadowMapSize: 2048, // directional-light shadow map resolution; drop to 1024 if split-screen shadow cost is too high (§Phase 4 item 3)
-  padBoostDuration: 0.9, // sec; boost-pad surface-zone timer, reuses the mushroom/drift boostTimer mechanism (§Phase 4 item 4)
+  manualBoostDuration: 0.8, // sec; §v5 BOOST button/thumbs-up/key, same boostTimer as pads and drift releases
+  boostCooldown: 2.5, // sec between manual boosts, owned by the kart so every input source is rate-limited alike (§v5)
+  padBoostDuration: 0.9, // sec; boost-pad surface-zone timer, reuses the manual/drift boostTimer mechanism (§Phase 4 item 4)
+  // §v5 Capricorn Coast: shortcut dirt + jump.
+  dirtSpeedCap: 0.66, // fraction of topSpeed on the shortcut's dirt -- a little slower than the tarmac S-bend it cuts when taken flat, a clear win with a boost (scripts/track.test.ts logs both lap times)
+  dirtDecel: 20, // decel while above the dirt cap; must beat `accel` (it fights full throttle every tick) or the cap never bites
+  gravity: 24, // m/s^2 for airborne karts -- heavier than real so jumps read snappy, not floaty
+  airSteerAuthority: 0.35, // fraction of normal yaw rate while airborne
 };

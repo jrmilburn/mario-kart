@@ -9,7 +9,7 @@ import { WebSocket, WebSocketServer, type WebSocketServer as WSS } from 'ws';
 import { publicControllerUrl } from './controllerUrl';
 import {
   parseMessage,
-  MAX_CONTROLLERS,
+  PHONE_SLOT,
   ROOM_CODE_CHARS,
   ROOM_CODE_LENGTH,
   ROOM_GRACE_MS,
@@ -54,7 +54,11 @@ if (hasCerts) {
 interface Room {
   code: string;
   gameSocket: WebSocket | null;
-  controllerSockets: (WebSocket | null)[]; // length MAX_CONTROLLERS, indexed by PlayerSlot
+  // §v5/stage2: exactly one controller can ever join (MAX_CONTROLLERS=1),
+  // always at PHONE_SLOT (P2) — indexed by PlayerSlot like before so the rest
+  // of this file (which still speaks generically in terms of `slot`) doesn't
+  // need to change shape; index 0 (P1, hands-only) is simply never used.
+  controllerSockets: (WebSocket | null)[];
   graceTimer: NodeJS.Timeout | null;
 }
 
@@ -128,6 +132,40 @@ function destroyRoom(room: Room) {
   rooms.delete(room.code);
 }
 
+// Server-side liveness check for every socket (game + controller), on top of
+// the app-level ping/pong the game and controller already exchange for RTT
+// display. That app-level ping only runs while the client-side JS is alive
+// and scheduling timers; a socket that's actually dead at the TCP level (or
+// whose tab was suspended without a clean close) can sit in `OPEN` readyState
+// indefinitely otherwise, which is exactly what let a reconnecting phone get
+// mistaken for a still-live one (see the controller-join handler above). Uses
+// raw WebSocket ping/pong frames, invisible to application code.
+const HEARTBEAT_INTERVAL_MS = 10_000;
+const HEARTBEAT_MISSED_LIMIT = 2;
+const heartbeatMissed = new WeakMap<WebSocket, number>();
+
+function attachHeartbeat(server: WSS): NodeJS.Timeout {
+  server.on('connection', (socket) => {
+    heartbeatMissed.set(socket, 0);
+    socket.on('pong', () => heartbeatMissed.set(socket, 0));
+  });
+  return setInterval(() => {
+    for (const socket of server.clients) {
+      const missed = heartbeatMissed.get(socket) ?? 0;
+      if (missed >= HEARTBEAT_MISSED_LIMIT) {
+        socket.terminate();
+        continue;
+      }
+      heartbeatMissed.set(socket, missed + 1);
+      try {
+        socket.ping();
+      } catch {
+        // socket already closing; the next tick (or its close handler) cleans it up
+      }
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
 function handleConnection(socket: WebSocket, req: IncomingMessage) {
   socket.on('message', (data) => {
     const msg = parseMessage(data.toString());
@@ -153,18 +191,16 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
           room = {
             code,
             gameSocket: socket,
-            controllerSockets: new Array(MAX_CONTROLLERS).fill(null),
+            controllerSockets: [null, null],
             graceTimer: null,
           };
           rooms.set(code, room);
         }
         socketState.set(socket, { role: 'game', roomCode: room.code });
         send(socket, { type: 'room', code: room.code, joinUrl: buildJoinUrl(req, room.code) });
-        for (let s = 0; s < MAX_CONTROLLERS; s++) {
-          const cs = room.controllerSockets[s];
-          if (cs && cs.readyState === WebSocket.OPEN) {
-            send(socket, { type: 'peer', event: 'controller-joined', slot: s as PlayerSlot });
-          }
+        const cs = room.controllerSockets[PHONE_SLOT];
+        if (cs && cs.readyState === WebSocket.OPEN) {
+          send(socket, { type: 'peer', event: 'controller-joined', slot: PHONE_SLOT });
         }
         return;
       }
@@ -175,25 +211,18 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
           send(socket, { type: 'error', reason: 'bad-room' });
           return;
         }
-        // Grant the requested slot if it's free/dead; otherwise the lowest
-        // free slot. `room-full` only when both slots are held by OPEN sockets.
-        let slot: PlayerSlot | null = null;
-        if (msg.wantSlot !== undefined) {
-          const held = room.controllerSockets[msg.wantSlot];
-          if (!held || held.readyState !== WebSocket.OPEN) slot = msg.wantSlot;
-        }
-        if (slot === null) {
-          for (let s = 0; s < MAX_CONTROLLERS; s++) {
-            const held = room.controllerSockets[s];
-            if (!held || held.readyState !== WebSocket.OPEN) {
-              slot = s as PlayerSlot;
-              break;
-            }
-          }
-        }
-        if (slot === null) {
-          send(socket, { type: 'error', reason: 'room-full' });
-          return;
+        // §v5/stage2: only one slot exists — the single phone always drives
+        // P2 (PHONE_SLOT). Newest controller always wins: a phone whose old
+        // socket died without a clean TCP close (backgrounded tab, flaky
+        // wifi, page reload) must never lock the slot as "room-full" for the
+        // reconnecting phone — that socket's OPEN readyState lies until the
+        // heartbeat below notices, which can take up to ~30s. Instead, any
+        // previously-held socket is forcibly terminated and replaced.
+        const slot: PlayerSlot = PHONE_SLOT;
+        const held = room.controllerSockets[slot];
+        if (held) {
+          if (room.gameSocket) send(room.gameSocket, { type: 'peer', event: 'controller-left', slot });
+          held.terminate();
         }
         room.controllerSockets[slot] = socket;
         socketState.set(socket, { role: 'controller', roomCode: room.code, slot });
@@ -214,21 +243,6 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
 
     if (state.role === 'controller' && msg.type === 'input') {
       if (room.gameSocket) send(room.gameSocket, { ...msg, slot: state.slot });
-      return;
-    }
-
-    // §Phase 3: character select, stamped with the sender's slot exactly like input.
-    if (state.role === 'controller' && msg.type === 'select') {
-      if (room.gameSocket) send(room.gameSocket, { ...msg, slot: state.slot });
-      return;
-    }
-
-    // §Phase 3: roster broadcast — every connected controller needs the full
-    // picture to grey out taken tiles, so no slot targeting here.
-    if (state.role === 'game' && msg.type === 'roster') {
-      for (const cs of room.controllerSockets) {
-        if (cs) send(cs, msg);
-      }
       return;
     }
 
@@ -276,6 +290,8 @@ function handleConnection(socket: WebSocket, req: IncomingMessage) {
 
 wss.on('connection', handleConnection);
 wssHttps?.on('connection', handleConnection);
+attachHeartbeat(wss);
+if (wssHttps) attachHeartbeat(wssHttps);
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   const lanIp = getLanIPv4();

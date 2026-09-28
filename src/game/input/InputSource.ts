@@ -1,160 +1,96 @@
-import { INPUT_STALE_MS, type InputSnapshot, type SteerMode } from '../../shared/protocol';
+import type { InputSnapshot, SteerMode } from '../../shared/protocol';
+import type { ControlProvider, ControlSourceKind, ControlState } from './ControlProvider';
+import { KeyboardProvider, KEYMAP_P1, KEYMAP_P2, type Keymap } from './KeyboardProvider';
+import { PhoneProvider } from './PhoneProvider';
 
-export interface ControlState {
-  steer: number;
-  throttle: 0 | 1;
-  brake: 0 | 1;
-  drift: 0 | 1;
-  item: 0 | 1;
-}
-
-const NEUTRAL: ControlState = { steer: 0, throttle: 0, brake: 0, drift: 0, item: 0 };
-
-// Keyboard input stays "active" this long after the last mapped keypress (D12).
-const KEYBOARD_OVERRIDE_MS = 2000;
-
-// Phase 2b: each InputSource instance owns one player's keyboard mapping, so
-// P1 (WASD/left-shift/K) and P2 (arrows/right-shift/slash) can drive
-// independently from the same keyboard.
-export interface Keymap {
-  throttle: string[];
-  brake: string[];
-  left: string[];
-  right: string[];
-  drift: string[];
-  item: string[];
-}
-
-export const KEYMAP_P1: Keymap = {
-  throttle: ['KeyW'],
-  brake: ['KeyS'],
-  left: ['KeyA'],
-  right: ['KeyD'],
-  drift: ['ShiftLeft'],
-  item: ['KeyK'],
-};
-
-export const KEYMAP_P2: Keymap = {
-  throttle: ['ArrowUp'],
-  brake: ['ArrowDown'],
-  left: ['ArrowLeft'],
-  right: ['ArrowRight'],
-  drift: ['ShiftRight'],
-  item: ['Slash'],
-};
+export type { ControlState, ControlSourceKind } from './ControlProvider';
+export { KEYMAP_P1, KEYMAP_P2, type Keymap };
 
 export interface InputDiagnostics {
-  source: 'keyboard' | 'controller' | 'neutral';
+  source: ControlSourceKind;
   steerMode: SteerMode | null;
   seq: number | null;
   ageMs: number | null;
 }
 
-// Merges controller snapshots (relayed over the network) and keyboard state into
-// a single ControlState sampled once per physics tick. Keyboard always wins for
-// 2s after the last mapped keypress (D12); otherwise the latest fresh controller
-// snapshot is used; otherwise neutral (coast).
+// §v5: one player's merged input. Priority, highest first:
+//   1. the keyboard, while "active" (2s after a mapped override key, D12) —
+//      a deliberate human override always wins;
+//   2. each `primary` provider in order (P1: hands; P2: phone);
+//   3. otherwise the keyboard's plain state, reported as 'keyboard' — that is
+//      what a player with a blocked camera / no phone is actually on.
+// Keyboard boost keys are ORed into whichever source wins (see
+// KeyboardProvider.attach for why they never count as activity). Drift keys
+// are ORed in the same way EXCEPT when the winning source is 'hands' — hands
+// never drift, so a hands player resting a hand on Shift must not drift.
 export class InputSource {
-  private latestSnapshot: InputSnapshot | null = null;
-  private latestReceivedAt = 0;
-  private keysDown = new Set<string>();
-  private lastKeyboardActivityAt = -Infinity;
-  private mappedCodes: Set<string>;
+  readonly keyboard: KeyboardProvider;
+  private primaries: ControlProvider[];
+  private phone: PhoneProvider | null;
 
-  constructor(private keymap: Keymap = KEYMAP_P1) {
-    this.mappedCodes = new Set([
-      ...keymap.throttle,
-      ...keymap.brake,
-      ...keymap.left,
-      ...keymap.right,
-      ...keymap.drift,
-      ...keymap.item,
-    ]);
+  constructor(keymap: Keymap, primaries: ControlProvider[] = []) {
+    this.keyboard = new KeyboardProvider(keymap);
+    this.primaries = primaries;
+    this.phone = (primaries.find((p) => p instanceof PhoneProvider) as PhoneProvider | undefined) ?? null;
   }
 
   attachKeyboard() {
-    window.addEventListener('keydown', (e) => {
-      if (!this.mappedCodes.has(e.code)) return;
-      this.keysDown.add(e.code);
-      this.lastKeyboardActivityAt = performance.now();
-    });
-    window.addEventListener('keyup', (e) => {
-      if (!this.mappedCodes.has(e.code)) return;
-      this.keysDown.delete(e.code);
-    });
-    window.addEventListener('blur', () => this.keysDown.clear());
+    this.keyboard.attach();
   }
 
+  // Snapshots for a player with no phone provider (P1) are dropped.
   onSnapshot(snapshot: InputSnapshot) {
-    // Discard out-of-order/duplicate snapshots, except a seq reset that arrives
-    // more than 1s after the last one (a fresh controller session reconnected).
-    if (
-      this.latestSnapshot &&
-      snapshot.seq <= this.latestSnapshot.seq &&
-      performance.now() - this.latestReceivedAt < 1000
-    ) {
-      return;
-    }
-    this.latestSnapshot = snapshot;
-    this.latestReceivedAt = performance.now();
-  }
-
-  private keyboardControlState(): ControlState {
-    const { throttle, brake, left, right, drift, item } = this.keymap;
-    const isLeft = left.some((c) => this.keysDown.has(c));
-    const isRight = right.some((c) => this.keysDown.has(c));
-    let steer = 0;
-    if (isLeft && !isRight) steer = -1;
-    else if (isRight && !isLeft) steer = 1;
-
-    return {
-      steer,
-      throttle: throttle.some((c) => this.keysDown.has(c)) ? 1 : 0,
-      brake: brake.some((c) => this.keysDown.has(c)) ? 1 : 0,
-      drift: drift.some((c) => this.keysDown.has(c)) ? 1 : 0,
-      item: item.some((c) => this.keysDown.has(c)) ? 1 : 0,
-    };
+    this.phone?.onSnapshot(snapshot);
   }
 
   isKeyboardActive(now: number): boolean {
-    return now - this.lastKeyboardActivityAt < KEYBOARD_OVERRIDE_MS;
+    return this.keyboard.isActive(now);
   }
 
+  // Which source would drive right now — side-effect free, for HUD labels.
+  activeKind(now: number = performance.now()): ControlSourceKind {
+    if (this.keyboard.isActive(now)) return 'keyboard';
+    for (const p of this.primaries) if (p.isActive(now)) return p.kind;
+    return 'keyboard';
+  }
+
+  // Call exactly once per physics tick per player: the hand provider's
+  // smoothing and one-shot thumbs-up boost advance on each call.
   sample(now: number = performance.now()): ControlState {
-    if (this.isKeyboardActive(now)) {
-      return this.keyboardControlState();
+    let winner: ControlState | null = this.keyboard.sample(now);
+    let winnerKind: ControlSourceKind = 'keyboard';
+    for (const p of this.primaries) {
+      // Every primary is sampled even when outranked, so its filters stay warm
+      // and a hand→keyboard→hand handover doesn't resume from stale state.
+      const s = p.sample(now);
+      if (!winner && s) {
+        winner = s;
+        winnerKind = p.kind;
+      }
     }
-    if (this.latestSnapshot && now - this.latestReceivedAt < INPUT_STALE_MS) {
-      const s = this.latestSnapshot;
-      return { steer: s.steer, throttle: s.throttle, brake: s.brake, drift: s.drift, item: s.item };
-    }
-    return NEUTRAL;
+    const control = winner ? { ...winner } : this.keyboard.state();
+    if (this.keyboard.boostHeld()) control.boost = 1;
+    // Hands never drift — don't let a Shift key someone rests a hand on (or
+    // habitually reaches for) drift a hands-driven kart.
+    if (this.keyboard.driftHeld() && winnerKind !== 'hands') control.drift = 1;
+    return control;
   }
 
-  // Raw controller snapshot age, independent of keyboard override — used by
-  // RaceDirector's pause-on-disconnect watchdog (§3.6), which cares about the
-  // phone's connectivity regardless of whether keyboard is currently driving.
+  // Raw phone snapshot age, independent of keyboard override — used by
+  // RaceDirector's pause-on-disconnect watchdog (§3.6). Always null for a
+  // player without a phone provider, so hands/keyboard seats never pause.
   rawControllerAgeMs(now: number = performance.now()): number | null {
-    return this.latestSnapshot ? now - this.latestReceivedAt : null;
+    return this.phone ? this.phone.ageMs(now) : null;
   }
 
   diagnostics(now: number = performance.now()): InputDiagnostics {
-    if (this.isKeyboardActive(now)) {
-      return { source: 'keyboard', steerMode: null, seq: null, ageMs: null };
-    }
-    if (this.latestSnapshot && now - this.latestReceivedAt < INPUT_STALE_MS) {
-      return {
-        source: 'controller',
-        steerMode: this.latestSnapshot.steerMode,
-        seq: this.latestSnapshot.seq,
-        ageMs: now - this.latestReceivedAt,
-      };
-    }
+    const source = this.activeKind(now);
+    const snap = this.phone?.latestSnapshot ?? null;
     return {
-      source: 'neutral',
-      steerMode: this.latestSnapshot?.steerMode ?? null,
-      seq: this.latestSnapshot?.seq ?? null,
-      ageMs: this.latestSnapshot ? now - this.latestReceivedAt : null,
+      source,
+      steerMode: source === 'phone' && snap ? snap.steerMode : null,
+      seq: snap?.seq ?? null,
+      ageMs: this.phone ? this.phone.ageMs(now) : null,
     };
   }
 }

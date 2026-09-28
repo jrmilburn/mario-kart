@@ -1,15 +1,19 @@
 {
-  "name": "mario-kart",
+  "name": "coast-kart",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/copy-mediapipe.mjs",
     "dev": "concurrently -n server,vite -c yellow,cyan \"tsx watch server/index.ts\" \"vite\"",
+    "prebuild": "node scripts/copy-mediapipe.mjs",
     "build": "vite build",
     "start": "tsx server/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "hands": "node scripts/copy-mediapipe.mjs && vite --config hands-demo/vite.config.ts"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
     "express": "^4.19.2",
     "qrcode": "^1.5.4",
     "three": "^0.169.0",

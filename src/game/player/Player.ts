@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { PlayerSlot } from '../../shared/protocol';
+import type { ControlProvider } from '../input/ControlProvider';
 import { InputSource, KEYMAP_P1, KEYMAP_P2 } from '../input/InputSource';
 import { FollowCamera } from '../render/FollowCamera';
 
@@ -27,10 +28,13 @@ export interface Player {
 // human-capable-only, exactly matching v1's single-player behavior. P2 (slot
 // 1) starts inactive; RaceDirector's countdown lock decides whether it drives
 // entity 1 for the upcoming race (see main.ts's roster-lock logic).
+// §v5: `primaries` are this seat's non-keyboard providers in priority order
+// (P1: hands; P2: phone) — see InputSource for how they merge with the keyboard.
 export function createPlayer(
   slot: PlayerSlot,
   entityIndex: number,
   groundHeightAt: (pos: THREE.Vector3) => number,
+  primaries: ControlProvider[] = [],
 ): Player {
   // §v3 polish: far plane 1000 -> 1500. The new mountain rings stand well
   // beyond the circuit, and a camera on the far side of the track from the
@@ -41,7 +45,7 @@ export function createPlayer(
   return {
     slot,
     entityIndex,
-    inputSource: new InputSource(KEYMAP_BY_SLOT[slot]),
+    inputSource: new InputSource(KEYMAP_BY_SLOT[slot], primaries),
     camera,
     followCamera: new FollowCamera(camera, groundHeightAt),
     connected: false,

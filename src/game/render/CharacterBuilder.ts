@@ -14,16 +14,21 @@
 // (physics/Kart.ts kartForward), y grows up from the seat cushion. Characters
 // end up ~0.9-1.2m tall from the seat depending on who they are.
 //
-// Everything is merged per-colour by PartAssembler, so a ~35-primitive Bowser
-// costs 9 draw calls (measured; 8-12 across the six drivers — Yoshi is the
-// cheapest, the plumbers the dearest). Geometry and materials are freshly allocated per call
-// because SceneBuilder.setDriver disposes the whole subtree when the driver is
-// swapped out (GLB arriving, character re-picked) — sharing either across
-// karts would free geometry another kart is still drawing.
+// Geometry, proportions and colours are exactly the v3 ones. Post-v5 they
+// render through the shared cel-shading pipeline: PartAssembler merges each
+// driver into TWO vertex-coloured toon meshes (the body, and the arms on
+// their steering-roll pivot — v3 was 9-13 colour-bucket meshes), each with a
+// baked inverted-hull outline child (Outline.ts; pupils/irises opt out, flat
+// decals are skipped automatically). Geometry is freshly allocated per call
+// because SceneBuilder.setDriver disposes the whole subtree's geometry when
+// the driver is swapped out (GLB arriving, character re-picked) — sharing it
+// across karts would free geometry another kart is still drawing. Materials
+// are the shared toon/outline caches and are never disposed.
 import * as THREE from 'three';
 import type { CharacterDef, DriverStyle } from '../characters/registry';
 import {
   PartAssembler,
+  type PartMaterialSpec,
   box,
   cyl,
   disc,
@@ -76,14 +81,16 @@ type Palette =
   // Peach's crown and then never referenced — the centre stone was built out
   // of `pupil` (0x2a2320) and rendered as a dark blob against the gold crown.
   // It gets its own bucket because no other palette slot is anywhere near
-  // blue; the bucket only materialises for the princess, so it costs one
-  // extra draw call on exactly one kart.
+  // blue. (Post-v5 buckets are vertex colours in one merged mesh, so it no
+  // longer costs a draw call.)
   | 'gem'
   | 'iris';
 
-function paletteFor(d: DriverStyle): Record<Palette, { color: number; tint?: boolean; flat?: boolean }> {
+// Pupils and irises sit on the eye whites; their own hulls would only smudge
+// the eye into a dark blob at chase distance, so they rely on the sclera's rim.
+function paletteFor(d: DriverStyle): Record<Palette, PartMaterialSpec> {
   return {
-    iris: { color: 0x287fba },
+    iris: { color: 0x287fba, outline: false },
     skin: { color: d.skin },
     shirt: { color: d.shirt },
     overalls: { color: d.overalls },
@@ -91,7 +98,7 @@ function paletteFor(d: DriverStyle): Record<Palette, { color: number; tint?: boo
     hair: { color: d.hair },
     accent: { color: d.accent },
     eye: { color: EYE_WHITE },
-    pupil: { color: PUPIL },
+    pupil: { color: PUPIL, outline: false },
     trim: { color: GOLD, flat: true },
     dark: { color: BOOT },
     gem: { color: GEM, flat: true },
@@ -428,18 +435,36 @@ export function buildCharacterModel(def: CharacterDef): THREE.Group {
       break;
   }
 
-  parts.build(root);
+  parts.build(root, { name: 'driver-body' });
   // Arms are authored in the same seat-local space as the body, so the pivot's
   // own height is subtracted out here rather than at every call site.
-  armParts.build(armPivot, { yOffset: -ARM_PIVOT_Y });
+  armParts.build(armPivot, { origin: [0, ARM_PIVOT_Y, 0], name: 'driver-arms' });
   root.add(armPivot);
-  root.userData.armPivot = armPivot;
+  const rig: DriverRig = { armPivot };
+  root.userData.rig = rig;
   return root;
 }
 
-// Kept out of buildCharacterModel so KartBuilder/SceneBuilder don't have to
-// know the userData key.
-export function armPivotOf(root: THREE.Object3D): THREE.Object3D | null {
-  const pivot = root.userData.armPivot;
-  return pivot instanceof THREE.Object3D ? pivot : null;
+// The procedural driver's animation hook: the arm-roll group, turned with the
+// steering wheel. A mounted GLB has no such node (SceneBuilder keeps
+// `visual.rig` null for it and only the kart's own steering wheel turns).
+export interface DriverRig {
+  armPivot: THREE.Object3D;
+}
+
+// Kept out of buildCharacterModel so SceneBuilder doesn't have to know the
+// userData key.
+export function driverRigOf(root: THREE.Object3D): DriverRig | null {
+  const rig = root.userData.rig as DriverRig | undefined;
+  return rig ?? null;
+}
+
+// The arms only need a hint of the steering wheel's roll (same sign convention
+// as SceneBuilder's STEER_WHEEL_SCALE).
+const STEER_ARM_SCALE = -0.22;
+
+// Per-frame driver animation, called from updateKartVisual: one scalar write,
+// allocation-free.
+export function animateDriver(rig: DriverRig, steer: number): void {
+  rig.armPivot.rotation.z = steer * STEER_ARM_SCALE;
 }

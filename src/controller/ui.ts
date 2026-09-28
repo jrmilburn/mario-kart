@@ -1,6 +1,5 @@
-import type { EventName, PlayerSlot, RosterPick } from '../shared/protocol';
+import type { EventName } from '../shared/protocol';
 import { TUNING } from '../game/tuning';
-import { CHARACTERS } from '../game/characters/registry';
 import { ControllerSocket, getStoredRoomCode, type ConnectionStatus } from './ControllerSocket';
 import { TouchSteering } from './TouchSteering';
 import { TiltSteering, checkTiltAvailability, requestTiltPermission } from './TiltSteering';
@@ -14,53 +13,20 @@ const STATUS_STYLE: Record<ConnectionStatus, [string, string]> = {
 
 const AUTO_THROTTLE_STORAGE_KEY = 'kart.controller.autoThrottle';
 
-// §v3 Track C1: the ITEM button needs a lit/dim look, which means a keyframed
-// glow pulse — not expressible inline. The controller has no stylesheet
-// either, so (mirroring PlayerHud) one <style> element is injected once.
-const CONTROLLER_STYLE_ELEMENT_ID = 'kart-controller-styles';
-
-function ensureControllerStyles() {
-  if (document.getElementById(CONTROLLER_STYLE_ELEMENT_ID)) return;
-  const style = document.createElement('style');
-  style.id = CONTROLLER_STYLE_ELEMENT_ID;
-  style.textContent = `
-@keyframes kartItemLit {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(243,156,18,0.55); }
-  50% { box-shadow: 0 0 18px 4px rgba(243,156,18,0.75); }
-}
-`;
-  document.head.appendChild(style);
-}
-
-// `dimmable` (§v3 Track C1) opts a button into the lit/dim treatment used by
-// ITEM: it starts DIM (desaturated, faded, no glow) and only comes alive when
-// the game says this phone is actually holding something. Every other button
-// keeps its original behaviour — always lit, opacity is purely the press
-// feedback — because a permanently-glowing GO button would say nothing.
-function makeHoldButton(label: string, color: string, extraStyle = '', dimmable = false) {
+// §stage2: every hold button is always lit now — the old lit/dim treatment
+// existed only for the ITEM button (the game has no items any more, and
+// the button itself is BOOST, always available). Opacity alone carries the
+// press feedback.
+function makeHoldButton(label: string, color: string, extraStyle = '') {
   const btn = document.createElement('button');
   btn.textContent = label;
   btn.style.cssText =
     `border-radius:16px; border:none; font-size:16px; font-weight:700; ` +
     `color:#fff; background:${color}; touch-action:none; ${extraStyle}`;
   let active = false;
-  let lit = !dimmable;
-  // One place that resolves press-state + lit-state into the final look, so
-  // the two can't clobber each other (pressing a dim ITEM button used to just
-  // reset opacity to 1 and lose the dim entirely).
-  const render = () => {
-    if (!dimmable) {
-      btn.style.opacity = active ? '0.6' : '1';
-      return;
-    }
-    btn.style.opacity = active ? '0.55' : lit ? '1' : '0.4';
-    btn.style.filter = lit ? 'none' : 'saturate(0.2) brightness(0.8)';
-    btn.style.animation = lit && !active ? 'kartItemLit 1.4s ease-in-out infinite' : 'none';
-    if (!lit || active) btn.style.boxShadow = 'none';
-  };
   const setActive = (v: boolean) => {
     active = v;
-    render();
+    btn.style.opacity = active ? '0.6' : '1';
   };
   btn.addEventListener('pointerdown', (e) => {
     btn.setPointerCapture(e.pointerId);
@@ -68,23 +34,16 @@ function makeHoldButton(label: string, color: string, extraStyle = '', dimmable 
   });
   btn.addEventListener('pointerup', () => setActive(false));
   btn.addEventListener('pointercancel', () => setActive(false));
-  render();
   return {
     el: btn,
     get active(): 0 | 1 {
       return active ? 1 : 0;
-    },
-    setLit(v: boolean) {
-      if (lit === v) return; // re-declaring `animation` every call would restart the pulse
-      lit = v;
-      render();
     },
   };
 }
 
 export function initControllerUI(root: HTMLElement) {
   root.innerHTML = '';
-  ensureControllerStyles();
 
   const wrapper = document.createElement('div');
   wrapper.style.cssText =
@@ -204,10 +163,10 @@ export function initControllerUI(root: HTMLElement) {
   rightCluster.style.cssText = 'display:flex; flex-direction:column; gap:10px;';
   controlsRow.appendChild(rightCluster);
 
-  // §v3 Track C1: ITEM is the one dimmable button — it reads dead until the
-  // game sends 'item-ready' for this slot. The keyframe colour in
-  // ensureControllerStyles is this same #f39c12.
-  const itemBtn = makeHoldButton('ITEM', '#f39c12', '', true);
+  // §v5: the old ITEM button (the game has no items any more) is now BOOST,
+  // always lit — a boost is always available, the kart enforces the cooldown.
+  // It sends a held level; the game fires on the rising edge.
+  const boostBtn = makeHoldButton('BOOST', '#f39c12');
   const brakeBtn = makeHoldButton('BRAKE', '#c0392b');
   const driftBtn = makeHoldButton('DRIFT', '#8e44ad');
   const throttleBtn = makeHoldButton('GO', '#27ae60');
@@ -221,9 +180,9 @@ export function initControllerUI(root: HTMLElement) {
   // Tilt mode: steering is handled by the wheel, freeing both thumbs for one
   // big button each. With auto-throttle OFF, that's DRIFT (left) and GO
   // (right, the primary action), with the secondary REVERSE tucked small
-  // underneath GO, mirrored by ITEM under DRIFT. With auto-throttle ON, GO is
+  // underneath GO, mirrored by BOOST under DRIFT. With auto-throttle ON, GO is
   // dropped (throttle is computed automatically) leaving three huge buttons:
-  // DRIFT alone on the left, ITEM+REVERSE stacked on the right. These use
+  // DRIFT alone on the left, BOOST+REVERSE stacked on the right. These use
   // flex-grow sizing (not fixed px) so the cluster stretches to fill the
   // phone's full remaining height edge-to-edge regardless of screen size,
   // instead of overflowing off the bottom on shorter phones.
@@ -235,9 +194,9 @@ export function initControllerUI(root: HTMLElement) {
       controlsRow.style.alignItems = 'flex-end';
       leftCluster.style.flex = '0 0 auto';
       rightCluster.style.flex = '0 0 auto';
-      leftCluster.append(itemBtn.el, brakeBtn.el);
+      leftCluster.append(boostBtn.el, brakeBtn.el);
       brakeBtn.el.textContent = 'BRAKE';
-      setFixedButtonSize(itemBtn.el, 120, 64, 16);
+      setFixedButtonSize(boostBtn.el, 120, 64, 16);
       setFixedButtonSize(brakeBtn.el, 120, 80, 16);
       if (autoThrottle) {
         rightCluster.append(driftBtn.el);
@@ -255,15 +214,15 @@ export function initControllerUI(root: HTMLElement) {
       brakeBtn.el.textContent = 'REVERSE';
       if (autoThrottle) {
         leftCluster.append(driftBtn.el);
-        rightCluster.append(itemBtn.el, brakeBtn.el);
+        rightCluster.append(boostBtn.el, brakeBtn.el);
         setFlexButtonSize(driftBtn.el, 4, 30);
-        setFlexButtonSize(itemBtn.el, 3, 28);
+        setFlexButtonSize(boostBtn.el, 3, 28);
         setFlexButtonSize(brakeBtn.el, 1, 16);
       } else {
-        leftCluster.append(driftBtn.el, itemBtn.el);
+        leftCluster.append(driftBtn.el, boostBtn.el);
         rightCluster.append(throttleBtn.el, brakeBtn.el);
         setFlexButtonSize(driftBtn.el, 5, 28); // bumped 26->28 to meet the grow>=3 => >=28px rule
-        setFlexButtonSize(itemBtn.el, 2, 16);
+        setFlexButtonSize(boostBtn.el, 2, 16);
         setFlexButtonSize(throttleBtn.el, 3, 28);
         setFlexButtonSize(brakeBtn.el, 1, 16);
       }
@@ -348,7 +307,7 @@ export function initControllerUI(root: HTMLElement) {
   root.appendChild(calibrationPanel);
 
   // §v3 polish: the "one tap to grant tilt" gate (see primeTiltPermission).
-  // z-index 18 sits above characterScreen (16) so it is the first thing a
+  // z-index 18 sits above raceOverlay (10) so it is the first thing a
   // freshly-joined phone shows, but below portraitBlocker (20) — rotating the
   // phone is the more fundamental instruction — and below calibrationPanel
   // (25), which is what replaces it the moment permission is granted.
@@ -508,11 +467,18 @@ export function initControllerUI(root: HTMLElement) {
       levelDot.style.left = `calc(50% + ${frac * 110}px)`;
     }
     if (steerMode === 'tilt') {
+      // CSS rotate(+deg) turns clockwise, and tiltSteering.steer is +1 for
+      // tilt-right (same human convention as the touch slider) — so this
+      // spoke turns clockwise for a right tilt, matching the physical wheel.
       wheelSpoke.style.transform = `translateX(-50%) rotate(${tiltSteering.steer * 90}deg)`;
     }
   }
   requestAnimationFrame(tickVisuals);
 
+  // §stage2: character select is gone entirely — P1 is always Mario, P2 always
+  // Luigi (registry.ts), so there is nothing to pick. The phone joins straight
+  // into this one overlay: a status line plus whichever of START/RESTART
+  // applies, layered over the (already-live) play panel underneath.
   const raceOverlay = document.createElement('div');
   raceOverlay.style.cssText =
     'position:fixed; inset:0; display:none; flex-direction:column; align-items:center; ' +
@@ -523,157 +489,19 @@ export function initControllerUI(root: HTMLElement) {
   raceStatusText.style.cssText = 'font-size:22px; text-align:center; padding:0 24px;';
   raceOverlay.appendChild(raceStatusText);
 
+  const startBtn = document.createElement('button');
+  startBtn.textContent = 'START RACE';
+  startBtn.style.cssText =
+    'font-size:20px; font-weight:800; padding:18px 36px; border-radius:16px; border:none; ' +
+    'background:#27ae60; color:#fff;';
+  raceOverlay.appendChild(startBtn);
+
   const restartBtn = document.createElement('button');
   restartBtn.textContent = 'RESTART';
   restartBtn.style.cssText =
     'font-size:20px; font-weight:800; padding:18px 36px; border-radius:16px; border:none; ' +
     'background:#2980b9; color:#fff;';
   raceOverlay.appendChild(restartBtn);
-
-  // §Track D: character select used to be a grid squeezed inside raceOverlay
-  // alongside the status text/START button, layered over the translucent
-  // play panel — the user's "overlaps with other parts of the controller"
-  // complaint. It is now its own dedicated, fully OPAQUE full-screen
-  // controller screen so nothing behind it (play panel, raceOverlay) bleeds
-  // through. Stacking: below the portrait blocker (z-index 20, §3.7) and the
-  // toast (z-index 30) — both must still render over it — above everything
-  // else (z-index 16). Layout target is a landscape phone (~700x340 CSS px):
-  // header row / large 3x2 tile grid filling the height / footer row.
-  const characterScreen = document.createElement('div');
-  characterScreen.style.cssText =
-    'position:fixed; inset:0; z-index:16; display:none; flex-direction:column; ' +
-    'background:linear-gradient(180deg, #1a1f27 0%, #0f1216 100%); color:#fff;';
-  root.appendChild(characterScreen);
-
-  const csHeader = document.createElement('div');
-  csHeader.style.cssText =
-    'flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; ' +
-    'padding:12px 20px; gap:12px;';
-  characterScreen.appendChild(csHeader);
-
-  const csTitle = document.createElement('div');
-  csTitle.textContent = 'CHOOSE YOUR RACER';
-  csTitle.style.cssText = 'font-size:16px; font-weight:800; letter-spacing:2px;';
-  csHeader.appendChild(csTitle);
-
-  const csBody = document.createElement('div');
-  csBody.style.cssText =
-    'flex:1; min-height:0; display:grid; grid-template-columns:repeat(3, 1fr); ' +
-    'grid-template-rows:repeat(2, minmax(86px, 1fr)); gap:10px; padding:4px 20px;';
-  characterScreen.appendChild(csBody);
-
-  // 3x2 grid of thumb-sized tiles (min-height 86px per spec). Each tile is a
-  // big colour disc (the kart colour) with the character's initial, the
-  // name at >=16px, an absolute-positioned ✓ shown only when it's your own
-  // pick, and a TAKEN label shown only when the other connected slot holds
-  // it (mutually exclusive with ✓ — a tile is never both).
-  interface CharacterTile {
-    id: string;
-    button: HTMLButtonElement;
-    check: HTMLElement;
-    takenLabel: HTMLElement;
-  }
-  const characterTiles: CharacterTile[] = CHARACTERS.map((c) => {
-    const button = document.createElement('button');
-    button.style.cssText =
-      'position:relative; display:flex; flex-direction:column; align-items:center; ' +
-      'justify-content:center; gap:6px; min-height:86px; border-radius:16px; ' +
-      'border:3px solid transparent; background:rgba(255,255,255,0.08); color:#fff; ' +
-      'touch-action:manipulation; padding:6px;';
-    const hex = `#${c.kartColor.toString(16).padStart(6, '0')}`;
-    const disc = document.createElement('div');
-    disc.style.cssText =
-      `width:46px; height:46px; border-radius:50%; background:${hex}; display:flex; ` +
-      'align-items:center; justify-content:center; font-size:20px; font-weight:800; ' +
-      'color:rgba(0,0,0,0.55); border:2px solid rgba(255,255,255,0.5); flex:0 0 auto;';
-    disc.textContent = c.name.charAt(0).toUpperCase();
-    const label = document.createElement('div');
-    label.textContent = c.name;
-    label.style.cssText = 'font-size:16px; font-weight:700;';
-    const check = document.createElement('div');
-    check.textContent = '✓';
-    check.style.cssText =
-      'position:absolute; top:6px; right:10px; font-size:16px; font-weight:900; ' +
-      'color:#2ecc71; display:none;';
-    const takenLabel = document.createElement('div');
-    takenLabel.textContent = 'TAKEN';
-    takenLabel.style.cssText =
-      'font-size:10px; font-weight:800; letter-spacing:1px; color:#e74c3c; display:none;';
-    button.append(check, disc, label, takenLabel);
-    button.addEventListener('click', () => {
-      if (button.disabled) return;
-      activeSocket?.sendSelect(c.id);
-    });
-    csBody.appendChild(button);
-    return { id: c.id, button, check, takenLabel };
-  });
-
-  let mySlot: PlayerSlot | null = null;
-  let latestPicks: RosterPick[] = [];
-
-  const csFooter = document.createElement('div');
-  csFooter.style.cssText =
-    'flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; ' +
-    'padding:14px 20px 18px;';
-  characterScreen.appendChild(csFooter);
-
-  const csYouLabel = document.createElement('div');
-  csYouLabel.style.cssText = 'font-size:14px; opacity:0.85;';
-  csFooter.appendChild(csYouLabel);
-
-  // Single START button, lives only here. Lobby is now the only state where
-  // characterScreen shows and raceOverlay is hidden entirely (see
-  // handleRaceEvent below), so there is no second START anywhere the user
-  // could see both at once.
-  const startBtn = document.createElement('button');
-  startBtn.textContent = 'START RACE';
-  startBtn.style.cssText =
-    'font-size:18px; font-weight:800; padding:14px 32px; border-radius:14px; border:none; ' +
-    'background:#27ae60; color:#fff;';
-  csFooter.appendChild(startBtn);
-
-  // Own pick highlighted (bright border + ✓); tiles the *other* connected
-  // slot currently holds are dimmed, labelled TAKEN and non-tappable. AI
-  // picks never appear here (those are resolved server-side only at
-  // countdown), so there's nothing to grey out on their account.
-  function renderCharacterTiles() {
-    const otherSlot: PlayerSlot | null = mySlot === 0 ? 1 : mySlot === 1 ? 0 : null;
-    const minePick = mySlot !== null ? latestPicks.find((p) => p.slot === mySlot)?.characterId ?? null : null;
-    const otherPick = otherSlot !== null ? latestPicks.find((p) => p.slot === otherSlot)?.characterId ?? null : null;
-    for (const tile of characterTiles) {
-      const taken = otherPick === tile.id;
-      const mine = minePick === tile.id;
-      tile.button.disabled = taken;
-      tile.button.style.opacity = taken ? '0.35' : '1';
-      tile.button.style.cursor = taken ? 'default' : 'pointer';
-      tile.button.style.borderColor = mine ? '#2ecc71' : 'transparent';
-      tile.button.style.background = mine ? 'rgba(46,204,113,0.18)' : 'rgba(255,255,255,0.08)';
-      tile.check.style.display = mine ? 'block' : 'none';
-      tile.takenLabel.style.display = taken ? 'block' : 'none';
-    }
-    const mineName = minePick ? CHARACTERS.find((c) => c.id === minePick)?.name ?? null : null;
-    csYouLabel.textContent = `You: ${mineName ?? '—'}`;
-  }
-
-  // The connection pill/RTT/slot badge (statusGroup, built near the top of
-  // this function) are one set of DOM nodes reused between the top bar and
-  // this screen's own header rather than duplicated ("reuse, don't
-  // duplicate state" per spec) — characterScreen is opaque and covers the
-  // top bar completely while shown, so the live status needs a visible home
-  // here instead. Moving them back on hide restores header's original
-  // (title, then statusGroup) child order, since header only ever holds
-  // those two nodes.
-  function showCharacterScreen() {
-    header.style.display = 'none';
-    csHeader.appendChild(statusGroup);
-    characterScreen.style.display = 'flex';
-  }
-
-  function hideCharacterScreen() {
-    characterScreen.style.display = 'none';
-    header.appendChild(statusGroup);
-    header.style.display = 'flex';
-  }
 
   // Portrait blocker: touch controls are landscape-only (§3.7).
   const portraitBlocker = document.createElement('div');
@@ -702,11 +530,12 @@ export function initControllerUI(root: HTMLElement) {
   startBtn.addEventListener('click', () => activeSocket?.sendEvent('start'));
   restartBtn.addEventListener('click', () => activeSocket?.sendEvent('restart'));
 
-  function showRaceOverlay(text: string, showRestart: boolean) {
+  function showRaceOverlay(text: string, buttons: { start?: boolean; restart?: boolean }) {
     raceOverlay.style.display = 'flex';
     raceStatusText.style.display = text ? 'block' : 'none';
     raceStatusText.textContent = text;
-    restartBtn.style.display = showRestart ? 'block' : 'none';
+    startBtn.style.display = buttons.start ? 'block' : 'none';
+    restartBtn.style.display = buttons.restart ? 'block' : 'none';
   }
 
   function hideRaceOverlay() {
@@ -718,28 +547,16 @@ export function initControllerUI(root: HTMLElement) {
     navigator.vibrate?.(ms);
   }
 
-  // §Track D: lobby shows characterScreen and hides raceOverlay entirely
-  // (raceOverlay's old lobby state — status text + START — no longer
-  // exists; START now lives only in characterScreen's footer). Every other
-  // state shows raceOverlay and hides characterScreen, so the two full-
-  // screen surfaces are always mutually exclusive — never both, never
-  // neither once joined.
-  // §v3 Track C1: 'item-ready'/'item-clear' are slot-targeted, so a phone only
-  // ever sees its OWN possession edges (the server relays game->controller
-  // events by `slot`). The state resets to dim on every state change that ends
-  // a race — the game clears held items on reset, and a stale lit ITEM button
-  // in the lobby would be a lie.
+  // §stage2: character select is gone, so this overlay is the ENTIRE
+  // post-join screen — lobby included (a START button rather than its own
+  // full-screen grid).
   function handleRaceEvent(name: EventName) {
     switch (name) {
       case 'lobby':
-        itemBtn.setLit(false);
-        hideRaceOverlay();
-        showCharacterScreen();
+        showRaceOverlay("You're P2 — ready when you are", { start: true });
         break;
       case 'countdown':
-        itemBtn.setLit(false);
-        hideCharacterScreen();
-        showRaceOverlay('Get ready…', false);
+        showRaceOverlay('Get ready…', {});
         // One tick per second for the 3-2-1 countdown, approximated locally
         // (the game doesn't send a message per tick, only the countdown start).
         vibrate(30);
@@ -748,31 +565,15 @@ export function initControllerUI(root: HTMLElement) {
         break;
       case 'go':
         hideRaceOverlay();
-        hideCharacterScreen();
-        break;
-      case 'paused':
-        hideCharacterScreen();
-        showRaceOverlay('Paused', false);
         break;
       case 'finished':
-        itemBtn.setLit(false);
-        hideCharacterScreen();
-        showRaceOverlay('🏁 Finished!', true);
+        showRaceOverlay('🏁 Finished!', { restart: true });
         break;
       case 'restart':
-        break; // a 'lobby' event immediately follows and resets both screens
+        break; // a 'lobby' event immediately follows and resets the overlay
       case 'boost':
       case 'collision':
         vibrate(30);
-        break;
-      case 'item-ready':
-        // A short buzz distinct from the 30ms boost/collision cue: you can
-        // feel that you picked something up without looking down.
-        itemBtn.setLit(true);
-        vibrate(20);
-        break;
-      case 'item-clear':
-        itemBtn.setLit(false);
         break;
     }
   }
@@ -796,7 +597,7 @@ export function initControllerUI(root: HTMLElement) {
         throttle: autoThrottle ? (brakeBtn.active ? 0 : 1) : throttleBtn.active,
         brake: brakeBtn.active,
         drift: driftBtn.active,
-        item: itemBtn.active,
+        boost: boostBtn.active,
         steerMode,
       }),
       {
@@ -808,23 +609,14 @@ export function initControllerUI(root: HTMLElement) {
         onJoined: (slot) => {
           slotBadge.textContent = slot === 0 ? 'P1' : 'P2';
           slotBadge.style.display = 'block';
-          mySlot = slot;
-          renderCharacterTiles();
           showPlay();
-          // §v3 Track C1: a (re)join carries no item state, so start dim and
-          // let the next 'item-ready' light it. (The button is already dim on
-          // a fresh page load; this covers rejoining after onGameLeft, where
-          // the same UI instance is reused.)
-          itemBtn.setLit(false);
-          // Default to the lobby screen (characterScreen) until an event says
-          // otherwise. If we're (re)joining mid-race, the game immediately
-          // follows up with a slot-targeted event carrying its current
-          // RaceDirector state (main.ts's onPeer) — handleRaceEvent's switch
-          // above then corrects the screen (e.g. 'countdown'/'paused' hide
-          // characterScreen and show raceOverlay instead). A genuine lobby
-          // join gets no such event, so this default stands.
-          hideRaceOverlay();
-          showCharacterScreen();
+          // Default to the lobby look until an event says otherwise. If we're
+          // (re)joining mid-race, the game immediately follows up with a
+          // slot-targeted event carrying its current RaceDirector state
+          // (main.ts's onPeer) — handleRaceEvent's switch above then corrects
+          // it (e.g. 'countdown'/'go' replace this). A genuine lobby join
+          // gets no such event, so this default stands.
+          handleRaceEvent('lobby');
           wakeLock.start();
           // Tilt is the default steering mode; attempt it once per session.
           // §v3 polish: if the attempt fails only because the platform wants a
@@ -840,16 +632,12 @@ export function initControllerUI(root: HTMLElement) {
         onJoinError: (reason) => {
           showCodeEntry(
             reason === 'room-full'
-              ? 'Both player slots are taken.'
+              ? "This game's phone slot is already connected — close it there first, or try again."
               : 'Room not found — check the code and try again.',
           );
         },
         onGameLeft: () => showCodeEntry('Game closed. Enter a new code to reconnect.'),
         onEvent: handleRaceEvent,
-        onRoster: (picks) => {
-          latestPicks = picks;
-          renderCharacterTiles();
-        },
         onRtt: (rttMs) => {
           rttText.textContent = `${Math.round(rttMs)}ms`;
         },

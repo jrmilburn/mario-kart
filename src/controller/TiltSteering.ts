@@ -72,15 +72,29 @@ export class TiltSteering {
   private sampled = false;
 
   constructor() {
-    const stored = sessionStorage.getItem(NEUTRAL_STORAGE_KEY);
-    if (stored !== null) this.neutral = Number(stored);
+    // §defect-fix: sessionStorage throws in some locked-down contexts
+    // (private browsing / storage-blocking extensions) — on iOS Safari in
+    // particular this could otherwise take down the whole controller page at
+    // construction time, before anything ever renders.
+    try {
+      const stored = sessionStorage.getItem(NEUTRAL_STORAGE_KEY);
+      if (stored !== null) this.neutral = Number(stored);
+    } catch {
+      // fall back to neutral = 0; calibrate() will still try to persist below
+    }
   }
 
   private handleEvent = (e: DeviceOrientationEvent) => {
     if (e.alpha === null || e.beta === null || e.gamma === null) return;
-    // PLAN-DEVIATION: negated — computeWheelAngle's raw sign steered opposite
-    // to the physical tilt direction (user-reported).
-    let wheelAngle = -computeWheelAngle(e.alpha, e.beta, e.gamma);
+    // Sign convention: computeWheelAngle's raw sign already matches the
+    // human-input convention used everywhere else (tilt right = +steer =
+    // screen right), the same as the touch slider (drag right = +1). An old
+    // commit negated this to work around a reversed-tilt report, but that was
+    // masking a bug in the OLD pipeline that has since been fixed at the one
+    // human -> physics boundary (main.ts, where +1 human steer is flipped to
+    // the physics convention). Negating here again would undo that fix and
+    // reverse tilt steering. Do not reintroduce the negation.
+    let wheelAngle = computeWheelAngle(e.alpha, e.beta, e.gamma);
 
     // Flip sign between the two landscape orientations so left is always left.
     const orientationAngle = screen.orientation?.angle ?? 0;

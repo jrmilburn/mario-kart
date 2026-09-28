@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { TUNING } from '../tuning';
 import { clamp, damp, lerp } from '../../shared/mathUtils';
-import type { ControlState } from '../input/InputSource';
+import type { ControlState } from '../input/ControlProvider';
+import type { SurfaceType } from '../track/trackData';
 
 export interface DriftState {
   phase: 'none' | 'active';
@@ -17,8 +18,18 @@ export interface KartState {
   steerActual: number; // damped steer, drives visuals + yaw
   drift: DriftState;
   boostTimer: number;
-  spinTimer: number;
   isAi: boolean;
+  // §v5 manual boost: seconds until the next one may fire, and last tick's
+  // boost input for rising-edge detection.
+  boostCooldown: number;
+  prevBoostInput: 0 | 1;
+  // §v5 jump: vertical state, integrated by physics/Airborne.ts stepVertical
+  // (never by stepKart, which stays 2D). landingVy is the (negative) vertical
+  // speed at the last touchdown, for squash intensity.
+  vy: number;
+  airborne: boolean;
+  airTime: number;
+  landingVy: number;
 }
 
 export function createKart(pos: THREE.Vector3, heading = 0, isAi = false): KartState {
@@ -30,8 +41,14 @@ export function createKart(pos: THREE.Vector3, heading = 0, isAi = false): KartS
     steerActual: 0,
     drift: { phase: 'none', dir: 1, charge: 0 },
     boostTimer: 0,
-    spinTimer: 0,
     isAi,
+    boostCooldown: 0,
+    prevBoostInput: 0,
+    // §v5 jump
+    vy: 0,
+    airborne: false,
+    airTime: 0,
+    landingVy: 0,
   };
 }
 
@@ -62,14 +79,13 @@ export function driftTier(charge: number): number {
   return tier;
 }
 
-const SPIN_OUT_YAW_RATE = 10; // rad/s
-
-// §3.2 steps 1-5. `offRoad` (from TrackQuery, |lateral| > ROAD_HALF) applies the
-// grass speed cap; boost overrides the cap so a mushroom powers through grass.
+// §3.2 steps 1-4. `offRoad` (from TrackQuery, on the verge and not on dirt)
+// applies the grass speed cap; boost overrides the cap so a boost powers
+// through grass.
 // `topSpeedScale` is AI rubber-banding/personality (§3.4 step 5) — applied only
 // to the cruise speed cap, never to accel/brake/off-road/boost physics constants.
-// `surface` (§Phase 4 item 4, from TrackQuery.surfaceAt) layers a track-authored
-// surface zone on top: 'boost' tops up boostTimer like a mushroom pickup,
+// `surface` (§Phase 4 item 4, from TrackQuery.surfaceUnder) layers a track-authored
+// surface zone on top: 'boost' tops up boostTimer like a manual boost,
 // 'sand' forces the off-road speed cap even when technically within ROAD_HALF.
 export function stepKart(
   kart: KartState,
@@ -77,26 +93,34 @@ export function stepKart(
   dt: number,
   offRoad = false,
   topSpeedScale = 1,
-  surface: 'boost' | 'sand' | null = null,
+  surface: SurfaceType | null = null,
 ) {
   const T = TUNING;
 
-  // 5. Spin-out (Phase 10 items): inputs forced neutral, heading spins, speed
-  // decays at brakeDecel. Pre-empts the rest of the step entirely while active.
-  if (kart.spinTimer > 0) {
-    kart.spinTimer = Math.max(0, kart.spinTimer - dt);
-    kart.heading += SPIN_OUT_YAW_RATE * dt;
-    kart.speed = moveToward(kart.speed, 0, T.brakeDecel * dt);
-    kart.pos.addScaledVector(kartForward(kart.heading), kart.speed * dt);
-    return;
+  // §v5 manual boost, fired on the input's rising edge and rate-limited here —
+  // in the kart, not in any input source — so hands, phone, keyboard and any
+  // future source all obey the same cooldown.
+  kart.boostCooldown = Math.max(0, kart.boostCooldown - dt);
+  const boostPressed = control.boost === 1 && kart.prevBoostInput === 0;
+  kart.prevBoostInput = control.boost;
+  if (boostPressed && kart.boostCooldown <= 0) {
+    kart.boostTimer = Math.max(kart.boostTimer, T.manualBoostDuration);
+    kart.boostCooldown = T.boostCooldown;
+  }
+
+  // §v5 jump: nothing on the ground acts on a kart in the air — no pad, no
+  // grass/sand/dirt drag (it is judged again the tick it lands).
+  if (kart.airborne) {
+    offRoad = false;
+    surface = null;
   }
 
   // 0. Boost-pad surface zone: tops up (never shortens) the same boostTimer a
-  // mushroom or a tiered drift release would set.
+  // manual boost or a tiered drift release would set.
   if (surface === 'boost') {
     kart.boostTimer = Math.max(kart.boostTimer, T.padBoostDuration);
   }
-  const effectiveOffRoad = offRoad || surface === 'sand';
+  const effectiveOffRoad = offRoad || surface === 'sand' || surface === 'dirt';
 
   // 1. Longitudinal
   if (kart.boostTimer > 0) {
@@ -119,8 +143,10 @@ export function stepKart(
   if (effectiveOffRoad && kart.boostTimer <= 0) {
     // §Phase 4 finding #1: sand is mechanically distinct from plain grass —
     // a lower cap and a stronger decel, not just the same offRoad penalty.
-    const capFrac = surface === 'sand' ? T.sandSpeedCap : T.offRoadSpeedCap;
-    const decel = surface === 'sand' ? T.sandDecel : T.offRoadDecel;
+    // §v5 shortcut: the dirt track is rough (slower than tarmac, kinder than
+    // grass) unless boosting — the boostTimer guard above already exempts it.
+    const capFrac = surface === 'sand' ? T.sandSpeedCap : surface === 'dirt' ? T.dirtSpeedCap : T.offRoadSpeedCap;
+    const decel = surface === 'sand' ? T.sandDecel : surface === 'dirt' ? T.dirtDecel : T.offRoadDecel;
     const cap = T.topSpeed * capFrac;
     if (Math.abs(kart.speed) > cap) {
       kart.speed = moveToward(kart.speed, Math.sign(kart.speed) * cap, decel * dt);
@@ -132,11 +158,12 @@ export function stepKart(
   const speedFrac = clamp(Math.abs(kart.speed) / T.topSpeed, 0, 1);
   const baseYawRate = lerp(T.steerMaxYawRate, T.steerYawRateAtTop, speedFrac);
   const lowSpeedAuthority = clamp(Math.abs(kart.speed) / 3, 0, 1);
-  const yawRate = baseYawRate * lowSpeedAuthority;
+  // §v5 jump: only a little steering authority in the air (no tyre grip).
+  const yawRate = baseYawRate * lowSpeedAuthority * (kart.airborne ? T.airSteerAuthority : 1);
 
   // 3. Drift state machine
   if (kart.drift.phase === 'none') {
-    if (control.drift && Math.abs(kart.speed) >= T.driftMinSpeed && Math.abs(kart.steerActual) > 0.25) {
+    if (control.drift && !kart.airborne && Math.abs(kart.speed) >= T.driftMinSpeed && Math.abs(kart.steerActual) > 0.25) {
       kart.drift.phase = 'active';
       kart.drift.dir = (Math.sign(kart.steerActual) || 1) as -1 | 1;
       kart.drift.charge = 0;

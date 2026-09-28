@@ -11,13 +11,15 @@ export interface MinimapKart {
 }
 
 // 2D canvas polyline of the centerline + colored kart dots, top-right (§Phase 11c).
+// §v5: the shortcut is drawn too, as a thinner dashed dirt-coloured line.
 export class Minimap {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
   private trackPoints: Array<{ x: number; z: number }>;
+  private shortcutPoints: Array<{ x: number; z: number }>;
 
-  constructor(container: HTMLElement, samples: TrackSample[]) {
+  constructor(container: HTMLElement, samples: TrackSample[], shortcut: readonly { pos: THREE.Vector3 }[] = []) {
     this.canvas = document.createElement('canvas');
     this.canvas.width = CANVAS_SIZE;
     this.canvas.height = CANVAS_SIZE;
@@ -27,8 +29,10 @@ export class Minimap {
     this.ctx = this.canvas.getContext('2d')!;
 
     this.trackPoints = samples.map((s) => ({ x: s.pos.x, z: s.pos.z }));
-    const xs = this.trackPoints.map((p) => p.x);
-    const zs = this.trackPoints.map((p) => p.z);
+    this.shortcutPoints = shortcut.map((s) => ({ x: s.pos.x, z: s.pos.z }));
+    const all = [...this.trackPoints, ...this.shortcutPoints];
+    const xs = all.map((p) => p.x);
+    const zs = all.map((p) => p.z);
     this.bounds = { minX: Math.min(...xs), maxX: Math.max(...xs), minZ: Math.min(...zs), maxZ: Math.max(...zs) };
   }
 
@@ -56,6 +60,20 @@ export class Minimap {
     });
     ctx.closePath();
     ctx.stroke();
+
+    if (this.shortcutPoints.length > 1) {
+      ctx.strokeStyle = 'rgba(214,168,110,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      this.shortcutPoints.forEach((p, i) => {
+        const { x, y } = this.project(p.x, p.z);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     for (const kart of karts) {
       const { x, y } = this.project(kart.pos.x, kart.pos.z);

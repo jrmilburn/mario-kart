@@ -3,11 +3,13 @@
 
 export type SteerMode = 'touch' | 'tilt';
 
-// Phase 2a (v2): up to two controllers per room, one per player. `slot` is
-// always stamped/assigned by the server — a controller never gets to claim
-// an arbitrary slot for itself, only *request* one via `wantSlot`.
+// `slot` is always stamped/assigned by the server — a controller never gets
+// to claim an arbitrary slot for itself.
+// §v5/stage2: exactly one controller per room now — P1 is hands-only (with a
+// keyboard fallback), so the single phone that can ever join always drives P2.
 export type PlayerSlot = 0 | 1;
-export const MAX_CONTROLLERS = 2;
+export const MAX_CONTROLLERS = 1;
+export const PHONE_SLOT: PlayerSlot = 1;
 
 export interface InputSnapshot {
   type: 'input';
@@ -16,7 +18,7 @@ export interface InputSnapshot {
   throttle: 0 | 1;
   brake: 0 | 1;
   drift: 0 | 1;
-  item: 0 | 1; // Phase 10 (optional): fire held item
+  boost: 0 | 1; // §v5: BOOST button held (was `item`); the kart fires on the rising edge with its own cooldown
   steerMode: SteerMode;
   slot?: PlayerSlot; // STAMPED BY SERVER on relay; never trusted from the controller. Game treats undefined as 0.
 }
@@ -31,7 +33,6 @@ export interface ControllerHello {
   type: 'hello';
   role: 'controller';
   code: string;
-  wantSlot?: PlayerSlot; // reclaim a slot after phone reload (sessionStorage 'kart.controller.slot')
 }
 
 export type HelloMessage = GameHello | ControllerHello;
@@ -59,27 +60,13 @@ export interface PeerMessage {
 }
 
 // game -> controller: state announcements, plus 'boost'/'collision' haptic
-// cues (§Phase 11d) and the 'item-ready'/'item-clear' possession cues (§v3
-// Track C1). controller -> game: 'start' (START button/Enter) and 'restart'
-// (restart button/R) are commands relayed verbatim.
+// cues (§Phase 11d). controller -> game: 'start' (START button/Enter) and
+// 'restart' (restart button/R) are commands relayed verbatim.
 //
-// §v3 Track C1: 'item-ready'/'item-clear' are *slot-targeted* game->controller
-// events — each phone only lights its own ITEM button, so they always carry a
-// slot (the server's game->controller relay routes by `slot`, falling back to
-// a broadcast when it's omitted; see server/index.ts). They fire on the rising
-// and falling edge of "this player holds an item", not every tick.
-export type EventName =
-  | 'lobby'
-  | 'countdown'
-  | 'go'
-  | 'paused'
-  | 'finished'
-  | 'restart'
-  | 'start'
-  | 'boost'
-  | 'collision'
-  | 'item-ready'
-  | 'item-clear';
+// §stage2: 'paused' is gone with the pause-on-disconnect watchdog (nothing
+// waits for a phone any more — see RaceDirector) and 'item-ready'/'item-clear'
+// are gone with the item-slot UI (§v5: the game has no items).
+export type EventName = 'lobby' | 'countdown' | 'go' | 'finished' | 'restart' | 'start' | 'boost' | 'collision';
 
 export interface EventMessage {
   type: 'event';
@@ -99,47 +86,17 @@ export interface PongMessage {
   t: number;
 }
 
-// §Phase 3: character select. controller -> game, slot STAMPED BY SERVER on
-// relay (never trusted from the controller) exactly like InputSnapshot.slot.
-export interface SelectMessage {
-  type: 'select';
-  characterId: string;
-  slot?: PlayerSlot;
-}
-
-// game -> all controllers, broadcast (no slot targeting needed — every phone
-// needs the full picture to grey out taken tiles). Re-sent whenever a pick
-// changes and whenever a controller joins, so a freshly-connected phone gets
-// the current state without the game needing separate join-time bookkeeping.
-// `characterId: null` means that slot currently has no live pick (e.g. no
-// controller connected there).
-export interface RosterPick {
-  slot: PlayerSlot;
-  characterId: string | null;
-}
-
-export interface RosterMessage {
-  type: 'roster';
-  picks: RosterPick[];
-}
-
 // Messages a controller socket may send to the server.
-export type ControllerToServer = ControllerHello | InputSnapshot | PingMessage | EventMessage | SelectMessage;
+export type ControllerToServer = ControllerHello | InputSnapshot | PingMessage | EventMessage;
 
 // Messages a game socket may send to the server.
-export type GameToServer = GameHello | EventMessage | PingMessage | RosterMessage;
+export type GameToServer = GameHello | EventMessage | PingMessage;
 
 // Messages the server may send to a controller socket.
-export type ServerToController =
-  | JoinedMessage
-  | ErrorMessage
-  | PeerMessage
-  | EventMessage
-  | PongMessage
-  | RosterMessage;
+export type ServerToController = JoinedMessage | ErrorMessage | PeerMessage | EventMessage | PongMessage;
 
 // Messages the server may send to a game socket.
-export type ServerToGame = RoomMessage | PeerMessage | InputSnapshot | EventMessage | PongMessage | SelectMessage;
+export type ServerToGame = RoomMessage | PeerMessage | InputSnapshot | EventMessage | PongMessage;
 
 export type AnyMessage =
   | HelloMessage
@@ -150,9 +107,7 @@ export type AnyMessage =
   | EventMessage
   | InputSnapshot
   | PingMessage
-  | PongMessage
-  | SelectMessage
-  | RosterMessage;
+  | PongMessage;
 
 const MAX_MESSAGE_BYTES = 1024;
 
@@ -190,10 +145,6 @@ function isAnyMessage(obj: unknown): obj is AnyMessage {
       return isPingOrPong(obj as PingMessage);
     case 'pong':
       return isPingOrPong(obj as PongMessage);
-    case 'select':
-      return isSelectMessage(obj as SelectMessage);
-    case 'roster':
-      return isRosterMessage(obj as RosterMessage);
     default:
       return false;
   }
@@ -212,7 +163,7 @@ export function isHelloMessage(m: unknown): m is HelloMessage {
   }
   if (o.role === 'controller') {
     const c = o as Partial<ControllerHello>;
-    return typeof c.code === 'string' && (c.wantSlot === undefined || isPlayerSlot(c.wantSlot));
+    return typeof c.code === 'string';
   }
   return false;
 }
@@ -243,19 +194,7 @@ export function isPeerMessage(m: unknown): m is PeerMessage {
 // Runtime validator mirror of EventName. A name missing from here is dropped
 // silently by parseMessage on BOTH hops (controller and game), so every
 // addition to the union above must be added here too (§v3 Track C1).
-const EVENT_NAMES: EventName[] = [
-  'lobby',
-  'countdown',
-  'go',
-  'paused',
-  'finished',
-  'restart',
-  'start',
-  'boost',
-  'collision',
-  'item-ready',
-  'item-clear',
-];
+const EVENT_NAMES: EventName[] = ['lobby', 'countdown', 'go', 'finished', 'restart', 'start', 'boost', 'collision'];
 
 export function isEventMessage(m: unknown): m is EventMessage {
   const o = m as Partial<EventMessage>;
@@ -274,7 +213,7 @@ export function isInputSnapshot(m: unknown): m is InputSnapshot {
     (o.throttle === 0 || o.throttle === 1) &&
     (o.brake === 0 || o.brake === 1) &&
     (o.drift === 0 || o.drift === 1) &&
-    (o.item === 0 || o.item === 1) &&
+    (o.boost === 0 || o.boost === 1) &&
     (o.steerMode === 'touch' || o.steerMode === 'tilt') &&
     (o.slot === undefined || isPlayerSlot(o.slot))
   );
@@ -285,29 +224,8 @@ export function isPingOrPong(m: unknown): m is PingMessage | PongMessage {
   return typeof o.t === 'number';
 }
 
-export function isSelectMessage(m: unknown): m is SelectMessage {
-  const o = m as Partial<SelectMessage>;
-  return (
-    typeof o.characterId === 'string' &&
-    o.characterId.length > 0 &&
-    o.characterId.length <= 32 &&
-    (o.slot === undefined || isPlayerSlot(o.slot))
-  );
-}
-
-function isRosterPick(v: unknown): v is RosterPick {
-  const o = v as Partial<RosterPick>;
-  return isPlayerSlot(o.slot) && (o.characterId === null || typeof o.characterId === 'string');
-}
-
-export function isRosterMessage(m: unknown): m is RosterMessage {
-  const o = m as Partial<RosterMessage>;
-  return Array.isArray(o.picks) && o.picks.every(isRosterPick);
-}
-
 export const ROOM_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export const ROOM_CODE_LENGTH = 4;
 export const PING_INTERVAL_MS = 2000;
 export const INPUT_STALE_MS = 400;
-export const CONTROLLER_ABSENT_MS = 2000;
 export const ROOM_GRACE_MS = 30_000;
