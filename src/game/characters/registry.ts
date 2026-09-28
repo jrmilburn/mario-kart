@@ -1,9 +1,10 @@
-// Single source of truth for the six playable/AI characters (§Phase 3). Both
-// the game (SceneBuilder/CharacterLoader) and the controller (character
-// select panel) import this — it's pure data, no THREE/DOM dependency, so
-// it's safe to pull into either bundle. Keep it that way: adding an `import
-// * as THREE` here would drag the whole renderer into the phone's controller
-// bundle.
+// Single source of truth for the six playable/AI characters (§Phase 3). It's
+// pure data, no THREE/DOM dependency, so it stays safe to pull into any
+// bundle (the phone controller no longer has a character select, but keep it
+// dependency-free anyway). Array order is the roster wiring: P1 (entity 0,
+// hands) is always CHARACTERS[0] = Mario, P2 (entity 1) CHARACTERS[1] = Luigi,
+// and main.ts's lockRoster hands the AI whatever the active humans aren't
+// showing, in this order (Peach, Yoshi, Toad, Bowser in versus).
 
 // §v3 Track B: the old three-colour CharacterFallbackColors (skin/primary/
 // secondary) could only describe "head + torso + cap", which is why every
@@ -12,6 +13,8 @@
 // (a cap with a brim and a moustache, a gown, a snout, a spiked shell) so each
 // racer is recognisable at 30m with zero GLB files present — the shipping
 // state. The GLB override path (setDriver with a loaded model) ignores both.
+// (Post-v5 they render cel-shaded with inverted-hull outlines — see
+// render/PartAssembler.ts — but the geometry and colours are the v3 ones.)
 export type DriverKind = 'plumber' | 'princess' | 'dino' | 'toad' | 'koopa';
 export type KartKind = 'standard' | 'slim' | 'royal' | 'buggy' | 'mini' | 'heavy';
 

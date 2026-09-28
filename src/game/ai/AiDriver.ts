@@ -34,6 +34,11 @@ export function createAiState(lane: number): AiState {
 export interface AiThinkResult {
   control: ControlState;
   topSpeedScale: number;
+  // §v5 review #1: true when this call teleported the kart (stuck/wall-scrape
+  // recovery). The caller must re-plant it with Airborne.groundKart — the
+  // recovery pose copies the centreline's height, which on a banked road is
+  // not the ground under the lane it lands in.
+  teleported: boolean;
 }
 
 // §3.4. Produces a ControlState (fed through the identical Kart.stepKart as
@@ -59,6 +64,7 @@ export function think(
   if (onWall) ai.wallScrapeTimer += dt;
   else ai.wallScrapeTimer = 0;
 
+  let teleported = false;
   if (ai.stuckTimer > STUCK_SECONDS || ai.wallScrapeTimer > WALL_SCRAPE_SECONDS) {
     const recoverySample = sampleAtArcLength(samples, totalLength, sNow);
     kart.pos.copy(recoverySample.pos).addScaledVector(recoverySample.right, ai.lane);
@@ -66,6 +72,7 @@ export function think(
     kart.speed = 5;
     ai.stuckTimer = 0;
     ai.wallScrapeTimer = 0;
+    teleported = true;
   }
 
   // 1. Lookahead target
@@ -116,8 +123,9 @@ export function think(
       throttle: tightAndFast ? 0 : 1,
       brake: tightAndFast ? 1 : 0,
       drift: ai.driftHeld ? 1 : 0,
-      item: 0, // AI item use is decided separately by tickAiItemDecision, not via ControlState
+      boost: 0, // §v5: AI never manual-boosts; pads and drift releases still boost it
     },
     topSpeedScale,
+    teleported,
   };
 }

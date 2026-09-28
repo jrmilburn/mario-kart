@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { TUNING } from '../tuning';
-import { GRASS_HALF } from '../track/trackData';
 import type { TrackQuery } from '../track/TrackQuery';
 import { angleWrap, clamp } from '../../shared/mathUtils';
 import { kartForward, type KartState } from './Kart';
@@ -13,10 +12,18 @@ const KART_KART_EXTRA_SEPARATION_MPS = 1.5; // "1.5 m/s position push" for side 
 // cannot tunnel even at top speed. Call after Kart.stepKart has integrated
 // position for this tick. Returns true for a non-glancing hit (used to fire
 // the §Phase 11d collision haptic) — a glancing scrape doesn't count.
+//
+// §v5 shortcut: the drivable region is the union of the main corridor and the
+// shortcut corridor. nearestSample already decides which one the kart is in
+// (or, outside both, which one it should be pushed back into) and reports that
+// corridor's lateral/right and its wall half-width, so this clamp is unchanged
+// apart from reading the limit from the query instead of assuming GRASS_HALF.
+// Where the shortcut crosses the main wall line the kart is legal on the
+// shortcut, so the main wall simply isn't there — that is the opening.
 export function resolveWallCollision(kart: KartState, trackQuery: TrackQuery): boolean {
   const T = TUNING;
   const q = trackQuery.nearestSample(kart.pos);
-  const limit = GRASS_HALF - T.kartRadius;
+  const limit = q.wallHalf - T.kartRadius;
   const absLateral = Math.abs(q.lateral);
 
   if (absLateral <= limit) return false;

@@ -9,13 +9,23 @@
 // Conventions (do not change without checking physics/Kart.ts kartForward):
 //  - Local +Z is the nose, +Y is up.
 //  - Everything in here is authored in GROUND space: y = 0 is the tyre contact
-//    patch. PartAssembler.build() shifts the merged geometry down by the body
+//    patch. PartAssembler.build() (its `origin` option) shifts the merged geometry down by the body
 //    group's pivot height at the end, so the drift-lean roll (applied to that
 //    group by updateKartVisual) pivots around the chassis floor rather than
 //    around the wheels' contact patch.
 //  - Wheels are returned separately and get parented to the kart ROOT, not to
 //    the leaning body, so they stay planted through a drift like they did
-//    before Track B.
+//    before Track B. Each front wheel is pivot (steer yaw) -> spinner (roll)
+//    -> mesh; the rear pair shares one axle line, so both are ONE mesh on one
+//    spinning group that sits on that axle.
+//
+// Geometry, proportions and colours are exactly the v3 ones, with one
+// addition: a dark hub cross on each rim, without which a spinning
+// cylinder is indistinguishable from a still one. Post-v5 the parts render
+// through PartAssembler's cel-shading pipeline — one vertex-coloured toon
+// mesh + baked outline hull for the chassis (v3: 5 colour-bucket meshes),
+// one per front wheel, one for the rear axle, and the steering wheel (no
+// outline) — and the kart colour is retinted through `tint` ranges.
 import * as THREE from 'three';
 import type { CharacterDef, KartKind } from '../characters/registry';
 import {
@@ -24,11 +34,13 @@ import {
   cone,
   cyl,
   disc,
+  disposeGeometries,
   limb,
   spanBoxZ,
   sphere,
   taperedBox,
   torus,
+  type TintRange,
 } from './PartAssembler';
 
 // Colours shared by every chassis regardless of character; only `shell` (the
@@ -106,21 +118,26 @@ const PROFILES: Record<KartKind, KartProfile> = {
 
 export interface KartChassis {
   // The node that takes the drift-lean roll and parents the driver anchor
-  // (see KartVisual.body). A Group now, not a Mesh — the chassis is 5 merged
-  // meshes (one per colour bucket) plus the steering wheel's 2.
+  // (see KartVisual.body). One merged chassis mesh + the steering wheel.
   body: THREE.Group;
   // Wheels live on the kart root (they must not lean); the two front ones are
-  // wrapped in steer pivots.
+  // wrapped in steer pivots (rotation.y)...
   frontWheelPivots: THREE.Group[];
-  // A single group holding BOTH rear wheels, merged into one tyre mesh + one
-  // rim mesh (nothing animates them independently). Still an array so
-  // SceneBuilder.mountChassis/setKartCharacter keep working unchanged.
+  // ...and roll on a child spinner each (rotation.x), same order as the pivots.
+  frontWheelSpinners: THREE.Object3D[];
+  // A single group holding BOTH rear wheels as one mesh. The group sits ON the
+  // shared axle line, so spinning it (rotation.x) rolls both wheels. Still an
+  // array so SceneBuilder.mountChassis/setKartCharacter stay generic.
   rearWheels: THREE.Group[];
+  frontR: number; // for the wheel spin rate (speed / radius)
+  rearR: number;
   // Rotated about its local Z by updateKartVisual for a bit of life.
   steeringWheel: THREE.Object3D;
-  // Every material carrying the kart colour, so setKartColor retints the whole
-  // chassis. Per-kart instances — never shared between karts (§Track B item 4).
-  tintMaterials: THREE.MeshLambertMaterial[];
+  // Every colour-attribute run carrying the kart colour (chassis body + its
+  // outline hull), so setKartColor retints the whole chassis in place. The
+  // buffers are this kart's own — tinting can never repaint another kart
+  // (§Track B item 4).
+  tint: TintRange[];
   // Ground-space seat anchor; SceneBuilder converts it into body-local space.
   seatY: number;
   seatZ: number;
@@ -141,20 +158,19 @@ export interface KartChassis {
 
 type ChassisPart = 'shell' | 'accent' | 'frame' | 'metal' | 'seat';
 
-// One steerable front wheel: dark tyre + a lighter rim disc poking out both
-// sides. Geometry is per-wheel (cheap, 60 tris) but the two materials are
-// shared with the merged rear axle below — and never across karts, matching
-// the tint rule. Only the fronts need this: they each hang off their own steer
-// pivot, so their transforms can't be baked the way the rears' are.
-function buildWheel(radius: number, width: number, tyreMat: THREE.Material, rimMat: THREE.Material): THREE.Group {
-  const wheel = new THREE.Group();
-  const tyre = new THREE.Mesh(cyl(radius, radius, width, 12).rotateZ(Math.PI / 2), tyreMat);
-  tyre.castShadow = true;
-  wheel.add(tyre);
-  const rim = new THREE.Mesh(cyl(radius * 0.56, radius * 0.56, width * 1.06, 8).rotateZ(Math.PI / 2), rimMat);
-  rim.castShadow = true;
-  wheel.add(rim);
-  return wheel;
+type WheelPart = 'tyre' | 'rim' | 'hub';
+
+function wheelParts() {
+  return new PartAssembler<WheelPart>({ tyre: { color: FRAME }, rim: { color: RIM }, hub: { color: FRAME } });
+}
+
+// One wheel around its own axle (axis = local X), offset `x` along it: dark
+// tyre + a lighter rim poking out both sides (the v3 wheel), plus a thin dark
+// hub cross over the rim so the roll actually reads when it spins.
+function addWheel(parts: PartAssembler<WheelPart>, r: number, w: number, x: number) {
+  parts.add('tyre', cyl(r, r, w, 12).rotateZ(Math.PI / 2).translate(x, 0, 0));
+  parts.add('rim', cyl(r * 0.56, r * 0.56, w * 1.06, 8).rotateZ(Math.PI / 2).translate(x, 0, 0));
+  parts.add('hub', box(w * 1.1, r * 0.9, 0.05).translate(x, 0, 0), box(w * 1.1, 0.05, r * 0.9).translate(x, 0, 0));
 }
 
 export function buildKartChassis(def: CharacterDef): KartChassis {
@@ -298,42 +314,45 @@ export function buildKartChassis(def: CharacterDef): KartChassis {
   // 'metal' bucket rather than being its own Mesh (§v3 Track B review finding
   // #3: it was one more draw call and one more material per kart for a single
   // 24-triangle tube). Authored in ground space like everything else — the
-  // yOffset in parts.build below moves it into body-local space.
+  // origin in parts.build below moves it into body-local space.
   parts.add('metal', limb([0, wheelY - 0.09, wheelZ + 0.05], [0, deckTop + 0.08, wheelZ + 0.26], 0.02, 0.027, 6));
 
-  // Every bucket flagged `tint` in the palette lands in here (today: 'shell',
-  // which covers the tub, pods, nose, engine cover and tail) so setKartColor
-  // repaints the whole chassis in one pass.
-  const tintMaterials: THREE.MeshLambertMaterial[] = [];
+  // Every bucket flagged `tint` in the palette (today: 'shell', which covers
+  // the tub, pods, nose, engine cover and tail) reports its vertex runs in
+  // `built.tint`, so setKartColor repaints the whole chassis in one pass.
   const body = new THREE.Group();
-  parts.build(body, { yOffset: -bodyPivotY, tintMaterials });
+  const built = parts.build(body, { origin: [0, bodyPivotY, 0], name: 'chassis' });
 
   // --- steering wheel -------------------------------------------------------
   // The wheel hangs off a fixed-tilt pivot so updateKartVisual only has to set
   // rotation.z (the column that reaches it is merged into the chassis above).
+  // No outline: the gloves cover most of it and it's tiny.
   const wheelPivot = new THREE.Group();
   wheelPivot.position.set(0, wheelY - bodyPivotY, wheelZ);
   wheelPivot.rotation.x = 0.4; // top tipped away from the driver, like a real column angle
   const steeringWheel = new THREE.Group();
-  const wheelParts = new PartAssembler<'rim' | 'hub'>({
+  const swParts = new PartAssembler<'rim' | 'hub'>({
     rim: { color: 0x2b2f36 },
     hub: { color: accent },
   });
   // Rim radius must equal CharacterBuilder's HAND_X — that's the contract that
   // puts every driver's gloves on the wheel.
-  wheelParts.add('rim', torus(0.17, 0.032, 4, 12));
-  wheelParts.add('hub', cyl(0.05, 0.05, 0.05, 8).rotateX(Math.PI / 2));
-  wheelParts.add('rim', box(0.30, 0.038, 0.02), box(0.038, 0.26, 0.02).translate(0, -0.07, 0));
-  wheelParts.build(steeringWheel);
+  swParts.add('rim', torus(0.17, 0.032, 4, 12));
+  swParts.add('hub', cyl(0.05, 0.05, 0.05, 8).rotateX(Math.PI / 2));
+  swParts.add('rim', box(0.30, 0.038, 0.02), box(0.038, 0.26, 0.02).translate(0, -0.07, 0));
+  swParts.build(steeringWheel, { outline: false, name: 'steering-wheel' });
   wheelPivot.add(steeringWheel);
   body.add(wheelPivot);
 
   const chassis: KartChassis = {
     body,
     frontWheelPivots: [],
+    frontWheelSpinners: [],
     rearWheels: [],
+    frontR: p.frontR,
+    rearR: p.rearR,
     steeringWheel,
-    tintMaterials,
+    tint: built.tint,
     seatY: p.seatY,
     seatZ: p.seatZ,
     bodyPivotY,
@@ -345,52 +364,40 @@ export function buildKartChassis(def: CharacterDef): KartChassis {
   };
 
   // --- wheels ---------------------------------------------------------------
-  const tyreMat = new THREE.MeshLambertMaterial({ color: FRAME });
-  const rimMat = new THREE.MeshLambertMaterial({ color: RIM });
+  // Same placement as v3; the extra spinner level only adds the roll axis.
   for (const sx of [1, -1]) {
     const pivot = new THREE.Group();
     pivot.position.set(sx * p.trackHalf, p.frontR, p.wheelbase);
-    pivot.add(buildWheel(p.frontR, p.tyreW, tyreMat, rimMat));
+    const spinner = new THREE.Group();
+    const wp = wheelParts();
+    addWheel(wp, p.frontR, p.tyreW, 0);
+    wp.build(spinner, { name: 'front-wheel' });
+    pivot.add(spinner);
     chassis.frontWheelPivots.push(pivot);
+    chassis.frontWheelSpinners.push(spinner);
   }
   // §v3 Track B review finding #3: the rear pair has fixed transforms (only the
   // front pair needs its own steer pivot), so both rear wheels go through one
-  // assembler and come out as a single tyre mesh + a single rim mesh instead of
-  // four — 2 fewer draw calls per kart, 8 fewer per frame across the grid, and
-  // doubled in split-screen.
+  // assembler and come out as a single mesh. The group sits on the rear axle
+  // line (v3 kept it at the origin with the wheels baked at axle height), so
+  // rolling it about X spins both wheels in place.
   const rearAxle = new THREE.Group();
-  const rearParts = new PartAssembler<'tyre' | 'rim'>({ tyre: { color: FRAME }, rim: { color: RIM } });
+  rearAxle.position.set(0, p.rearR, -p.wheelbase);
+  const rearParts = wheelParts();
   const rearW = p.tyreW * 1.12;
-  for (const sx of [1, -1]) {
-    rearParts.add('tyre', cyl(p.rearR, p.rearR, rearW, 12).rotateZ(Math.PI / 2).translate(sx * p.trackHalf, p.rearR, -p.wheelbase));
-    rearParts.add(
-      'rim',
-      cyl(p.rearR * 0.56, p.rearR * 0.56, rearW * 1.06, 8).rotateZ(Math.PI / 2).translate(sx * p.trackHalf, p.rearR, -p.wheelbase),
-    );
-  }
-  rearParts.build(rearAxle);
+  for (const sx of [1, -1]) addWheel(rearParts, p.rearR, rearW, sx * p.trackHalf);
+  rearParts.build(rearAxle, { name: 'rear-axle' });
   chassis.rearWheels.push(rearAxle);
 
   return chassis;
 }
 
-// Frees everything a chassis owns. Only ever called when a player re-picks a
-// character (SceneBuilder.setKartCharacter rebuilds the chassis so they get
-// that character's kart, not just its colour); the geometry/materials here are
-// per-kart instances, so nothing else can be left dangling. De-duplicated
-// because the wheels share the tyre/rim materials.
+// Frees everything a chassis owns — geometry only: the materials are the
+// shared toon/outline caches (see PartAssembler's disposal invariant). Only
+// ever called when an entity changes character (SceneBuilder.setKartCharacter
+// rebuilds the chassis so they get that character's kart, not just its
+// colour).
 export function disposeChassis(chassis: KartChassis) {
-  const geos = new Set<THREE.BufferGeometry>();
-  const mats = new Set<THREE.Material>();
   const roots: THREE.Object3D[] = [chassis.body, ...chassis.frontWheelPivots, ...chassis.rearWheels];
-  for (const root of roots) {
-    root.traverse((obj) => {
-      if (!(obj instanceof THREE.Mesh)) return;
-      geos.add(obj.geometry as THREE.BufferGeometry);
-      if (Array.isArray(obj.material)) obj.material.forEach((m) => mats.add(m));
-      else mats.add(obj.material as THREE.Material);
-    });
-  }
-  for (const g of geos) g.dispose();
-  for (const m of mats) m.dispose();
+  for (const root of roots) disposeGeometries(root);
 }

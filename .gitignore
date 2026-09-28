@@ -4,8 +4,14 @@ certs/
 .DS_Store
 *.log
 
-# Phase 3: user-supplied character GLBs (personal/local use only — see
-# README.md "Character models"). public/assets/README.md stays tracked so
-# the folder's purpose is documented even with zero models present.
+# Optional user-supplied texture overrides (see public/assets/README.md, which
+# stays tracked so the folder's purpose is documented even when it's empty).
 public/assets/**
 !public/assets/README.md
+
+# v5: MediaPipe wasm runtime, copied out of node_modules by
+# scripts/copy-mediapipe.mjs on predev/prebuild. The hand_landmarker.task model
+# next to it IS tracked (it isn't in any npm package).
+public/mediapipe/wasm/
+.vercel
+.env*

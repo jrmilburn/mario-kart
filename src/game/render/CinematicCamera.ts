@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { damp } from '../../shared/mathUtils';
-import { kartForward, type KartState } from '../physics/Kart';
+import type { KartState } from '../physics/Kart';
 
 // §v3 polish: the post-race show. Once the race enters FINISHED, main.ts hands
 // every kart (including the humans') to the AI autopilot and swaps the split-
@@ -94,7 +94,7 @@ export class CinematicCamera {
     if (this.timer <= 0 || this.subject >= subjects.length) this.cut(subjects);
 
     const kart = subjects[this.subject].kart;
-    this.forward.copy(kartForward(kart.heading));
+    this.forward.set(Math.sin(kart.heading), 0, Math.cos(kart.heading)); // = kartForward(), without its allocation
     // right = UP x forward, matching the track's own frame convention.
     this.right.set(this.forward.z, 0, -this.forward.x);
 
@@ -192,7 +192,7 @@ export class CinematicCamera {
     if (spec.kind === 'trackside') {
       // Plant the camera up the road from wherever the subject is right now,
       // off to one side, and leave it there for the length of the shot.
-      this.forward.copy(kartForward(kart.heading));
+      this.forward.set(Math.sin(kart.heading), 0, Math.cos(kart.heading)); // = kartForward(), without its allocation
       this.right.set(this.forward.z, 0, -this.forward.x);
       const side = Math.random() < 0.5 ? -1 : 1;
       this.anchor.copy(kart.pos).addScaledVector(this.forward, TRACKSIDE_LEAD).addScaledVector(this.right, side * 13);

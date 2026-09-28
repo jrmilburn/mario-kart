@@ -5,12 +5,21 @@ import {
   type GameToServer,
   type InputSnapshot,
   type PlayerSlot,
-  type RosterPick,
 } from '../../shared/protocol';
+import { resolveRelayUrl } from '../../shared/relayUrl';
 
 const ROOM_STORAGE_KEY = 'kart.game.roomCode';
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000];
 const MISSED_PONG_LIMIT = 2;
+
+// §stage2: same relay-discovery rule as the controller (ControllerSocket.ts)
+// — an explicit VITE_RELAY_URL wins (any of wss://host, wss://host/ws,
+// https://host, http://host, or a bare host — see shared/relayUrl.ts), else
+// same-origin.
+function relayUrl(): string {
+  const configured = import.meta.env.VITE_RELAY_URL as string | undefined;
+  return resolveRelayUrl(configured, { protocol: location.protocol, host: location.host });
+}
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting';
 
@@ -19,7 +28,6 @@ export interface GameSocketCallbacks {
   onPeer?: (event: 'controller-joined' | 'controller-left' | 'game-left', slot?: PlayerSlot) => void;
   onInput?: (snapshot: InputSnapshot) => void;
   onEvent?: (name: EventName, slot?: PlayerSlot) => void; // commands relayed from the controller (start/restart)
-  onSelect?: (characterId: string, slot?: PlayerSlot) => void; // §Phase 3: relayed from the controller, slot server-stamped
   onStatus?: (status: ConnectionStatus) => void;
   onRtt?: (rttMs: number) => void;
 }
@@ -40,14 +48,22 @@ export class GameSocket {
 
   private connect() {
     this.callbacks.onStatus?.(this.reconnectAttempt === 0 ? 'connecting' : 'reconnecting');
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const ws = new WebSocket(relayUrl());
     this.ws = ws;
 
     ws.addEventListener('open', () => {
       this.reconnectAttempt = 0;
       this.missedPongs = 0;
-      const wantRoom = sessionStorage.getItem(ROOM_STORAGE_KEY) ?? undefined;
+      // §defect-fix: sessionStorage throws in some locked-down contexts
+      // (private browsing / storage-blocking extensions) — a throw here would
+      // kill the socket's open handler and leave the game silently unable to
+      // ever announce itself to the relay.
+      let wantRoom: string | undefined;
+      try {
+        wantRoom = sessionStorage.getItem(ROOM_STORAGE_KEY) ?? undefined;
+      } catch {
+        wantRoom = undefined;
+      }
       this.sendRaw({ type: 'hello', role: 'game', wantRoom });
       this.startHeartbeat();
       this.callbacks.onStatus?.('connected');
@@ -71,9 +87,6 @@ export class GameSocket {
           break;
         case 'event':
           this.callbacks.onEvent?.(msg.name, msg.slot);
-          break;
-        case 'select':
-          this.callbacks.onSelect?.(msg.characterId, msg.slot);
           break;
         case 'pong': {
           const sentAt = this.pendingPings.get(msg.t);
@@ -126,10 +139,6 @@ export class GameSocket {
 
   sendEvent(name: EventName, slot?: PlayerSlot) {
     this.sendRaw({ type: 'event', name, slot });
-  }
-
-  sendRoster(picks: RosterPick[]) {
-    this.sendRaw({ type: 'roster', picks });
   }
 
   private sendRaw(msg: GameToServer) {

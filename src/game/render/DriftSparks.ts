@@ -1,84 +1,127 @@
-import * as THREE from 'three';
+import { ParticlePool } from './ParticlePool';
 
-const MAX_PARTICLES = 300;
-const PARTICLE_SIZE = 0.15;
-const GRAVITY = 2;
-const OFFSCREEN_Y = -1000;
+// §v5 Effects: drift sparks. Upgraded from the §Phase 11a single-point burst
+// (one grey/blue/orange/purple PointsMaterial dot stream from the kart's
+// centre) to a pair of tyre-contact fountains whose colour AND vigour climb
+// with how long the drift has been held — the thing a player reads to time
+// the release:
+//   tier 0 (charging)  blue-white, a thin trickle
+//   tier 1             yellow
+//   tier 2             orange
+//   tier 3             pink/purple, the fattest, fastest spray
+// Colours are HDR (> 1) and additive, so in High quality they bloom (PostFX);
+// tier 0 is kept just under the bloom threshold's knee so a fresh drift
+// doesn't flare — the glow arriving IS the "tier 1 reached" cue.
+//
+// Emission is time-based (sparks per second, fractional carry per kart), not
+// per-frame, so the stream is the same density at 60Hz and 144Hz.
 
-// Tinted by drift tier (§Phase 11a), matching Hud's drift-bar colors.
-const TIER_COLORS = [
-  new THREE.Color(0x7f8c8d), // 0: gray (charging, below tier 1)
-  new THREE.Color(0x3498db), // 1: blue
-  new THREE.Color(0xe67e22), // 2: orange
-  new THREE.Color(0x9b59b6), // 3: purple
+// Linear RGB, pre-multiplied by the bloom drive.
+const TIER_RGB: readonly (readonly [number, number, number])[] = [
+  [0.62, 0.8, 1.05], // 0 blue-white
+  [2.4, 1.85, 0.35], // 1 yellow
+  [2.9, 1.05, 0.18], // 2 orange
+  [2.6, 0.55, 2.9], // 3 pink/purple
 ];
+const TIER_RATE = [50, 80, 100, 130]; // sparks per second, per wheel
+const TIER_SIZE = [0.12, 0.16, 0.19, 0.24]; // metres
+const TIER_SPEED = [2.2, 3, 3.6, 4.4]; // m/s, spray speed off the tyre
 
-// A single pooled THREE.Points burst system shared by all karts, so drift
-// sparks never cost more than one draw call regardless of how many karts
-// are drifting at once.
 export class DriftSparks {
-  points: THREE.Points;
-  private positions: Float32Array;
-  private colors: Float32Array;
-  private velocities: Float32Array;
-  private ages: Float32Array;
-  private lifetimes: Float32Array;
-  private cursor = 0;
+  readonly pool = new ParticlePool({
+    capacity: 900,
+    additive: true,
+    gravity: 11,
+    drag: 2.5,
+    envelope: 'spark',
+    falloff: 'hot',
+    name: 'drift-sparks',
+  });
+  private readonly carry: Float32Array;
 
-  constructor() {
-    this.positions = new Float32Array(MAX_PARTICLES * 3);
-    this.colors = new Float32Array(MAX_PARTICLES * 3);
-    this.velocities = new Float32Array(MAX_PARTICLES * 3);
-    this.ages = new Float32Array(MAX_PARTICLES).fill(Infinity);
-    this.lifetimes = new Float32Array(MAX_PARTICLES);
-    for (let i = 0; i < MAX_PARTICLES; i++) this.positions[i * 3 + 1] = OFFSCREEN_Y;
-
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(this.colors, 3));
-    const mat = new THREE.PointsMaterial({
-      size: PARTICLE_SIZE,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.9,
-      depthWrite: false,
-    });
-    this.points = new THREE.Points(geo, mat);
+  constructor(maxKarts: number) {
+    this.carry = new Float32Array(maxKarts);
   }
 
-  emit(pos: THREE.Vector3, tier: number, count = 2) {
-    const color = TIER_COLORS[Math.min(tier, TIER_COLORS.length - 1)];
-    for (let n = 0; n < count; n++) {
-      const i = this.cursor;
-      this.cursor = (this.cursor + 1) % MAX_PARTICLES;
-      this.positions[i * 3] = pos.x + (Math.random() - 0.5) * 0.3;
-      this.positions[i * 3 + 1] = pos.y + Math.random() * 0.2;
-      this.positions[i * 3 + 2] = pos.z + (Math.random() - 0.5) * 0.3;
-      this.velocities[i * 3] = (Math.random() - 0.5) * 1.5;
-      this.velocities[i * 3 + 1] = Math.random() * 1.5 + 0.5;
-      this.velocities[i * 3 + 2] = (Math.random() - 0.5) * 1.5;
-      this.colors[i * 3] = color.r;
-      this.colors[i * 3 + 1] = color.g;
-      this.colors[i * 3 + 2] = color.b;
-      this.ages[i] = 0;
-      this.lifetimes[i] = 0.35 + Math.random() * 0.2;
+  get points() {
+    return this.pool.points;
+  }
+
+  // One frame of sparks for kart `k`, drifting toward `dir` (+1/-1) at
+  // `tier`. The two contact points are (x0,z0)/(x1,z1) at height `y`;
+  // (fx,fz) is the kart's forward and (rx,rz) its right, both unit, and
+  // (vx,vz) the kart's own velocity so the spray is thrown from a moving tyre.
+  emit(
+    k: number,
+    dt: number,
+    tier: number,
+    dir: number,
+    x0: number,
+    z0: number,
+    x1: number,
+    z1: number,
+    y: number,
+    fx: number,
+    fz: number,
+    rx: number,
+    rz: number,
+    vx: number,
+    vz: number,
+  ) {
+    const t = Math.max(0, Math.min(3, tier));
+    this.carry[k] += TIER_RATE[t] * dt;
+    const n = Math.floor(this.carry[k]);
+    this.carry[k] -= n;
+    const [cr, cg, cb] = TIER_RGB[t];
+    const speed = TIER_SPEED[t];
+    const size = TIER_SIZE[t];
+    for (let i = 0; i < n; i++) {
+      for (let w = 0; w < 2; w++) {
+        const px = w === 0 ? x0 : x1;
+        const pz = w === 0 ? z0 : z1;
+        // Thrown back off the tyre and out to the drift's outside, with a
+        // hop up; the kart's own velocity is mostly inherited so the spray
+        // trails the kart instead of hanging in the air behind it.
+        const back = speed * (0.6 + Math.random() * 0.6);
+        const side = (dir * 0.7 + (Math.random() - 0.5) * 1.6) * speed * 0.55;
+        const up = speed * (0.35 + Math.random() * 0.55);
+        // A little per-spark brightness jitter keeps the stream from looking
+        // like a solid tube.
+        const j = 0.7 + Math.random() * 0.5;
+        this.pool.spawn(
+          px + (Math.random() - 0.5) * 0.12,
+          y + Math.random() * 0.05,
+          pz + (Math.random() - 0.5) * 0.12,
+          vx * 0.85 - fx * back + rx * side,
+          up,
+          vz * 0.85 - fz * back + rz * side,
+          cr * j,
+          cg * j,
+          cb * j,
+          1,
+          size * (0.8 + Math.random() * 0.5),
+          size * 0.25,
+          0.22 + Math.random() * 0.2,
+        );
+      }
     }
+  }
+
+  // Drops kart `k`'s fractional carry, so the next drift starts clean.
+  stop(k: number) {
+    this.carry[k] = 0;
+  }
+
+  setScale(scale: number) {
+    this.pool.setScale(scale);
   }
 
   update(dt: number) {
-    for (let i = 0; i < MAX_PARTICLES; i++) {
-      if (this.ages[i] === Infinity) continue;
-      this.ages[i] += dt;
-      if (this.ages[i] > this.lifetimes[i]) {
-        this.ages[i] = Infinity;
-        this.positions[i * 3 + 1] = OFFSCREEN_Y;
-        continue;
-      }
-      this.positions[i * 3] += this.velocities[i * 3] * dt;
-      this.positions[i * 3 + 1] += this.velocities[i * 3 + 1] * dt - GRAVITY * dt;
-      this.positions[i * 3 + 2] += this.velocities[i * 3 + 2] * dt;
-    }
-    (this.points.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-    (this.points.geometry.attributes.color as THREE.BufferAttribute).needsUpdate = true;
+    this.pool.update(dt);
+  }
+
+  clear() {
+    this.carry.fill(0);
+    this.pool.clear();
   }
 }

@@ -1,3 +1,5 @@
+> Historical note: this is the original implementation spec and describes the pre-v5 design (phone-only controls, items, the old maps and characters). The current game is described in README.md.
+
 # Phone-Controlled Kart Racer — Implementation Plan
 
 A single-player, browser-based arcade kart racer. The desktop browser renders the game; a phone browser is the controller, paired by room code / QR. This document is the complete spec. The implementer (Claude Sonnet 5) works one phase at a time and does not deviate from it.

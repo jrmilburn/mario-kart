@@ -1,9 +1,29 @@
-# Phone-Controlled Kart Racer
+# Coast Kart
 
-A single-player, browser-based arcade kart racer. The desktop browser renders the game;
-a phone browser is the controller, paired by room code / QR.
+A browser arcade kart racer. Player 1 steers with their hands in front of the webcam
+(keyboard fallback); in Versus, player 2 joins on a phone paired by room code / QR (or
+plays on the keyboard).
 
-See `PLAN.md` for the full spec.
+`PLAN.md` is the original spec (it describes the pre-v5 design).
+
+## Hand controls (P1, webcam)
+
+Hold both fists up like a steering wheel; a 3-second "hold your fists level" step
+calibrates the centre (C recalibrates).
+
+| Gesture | Does |
+| --- | --- |
+| Tilt the wheel (one fist lower than the other) | Steer |
+| Both hands closed fists | Gas |
+| Both hands open | Brake — reverse from a standstill |
+| One fist, one open (or in between) | Coast |
+| Thumbs-up flick on either fist (thumb out from a closed fist) | Boost (the kart's 2.5s cooldown applies) |
+
+With only one hand in view, that hand alone decides gas / brake / coast. If every hand
+drops out of frame, the last gas/brake is held for 300ms and then the kart coasts. Hands
+never drift — drift is on the keyboard (left / right Shift) and the phone's DRIFT button. The
+debug overlay (backtick) shows each hand's openness ratio `r` (fist < 0.55, open > 0.85)
+and thumb ratio `t` (thumbs-up > 0.8, release < 0.65) for tuning against a real camera.
 
 ## Development
 
@@ -57,6 +77,20 @@ load) just keeps its procedural fallback driver, silently, with a console warnin
 never deploy a build that includes them anywhere public. The procedural-fallback mode
 (i.e. the repo as checked out, before you add any models) is the only configuration safe to
 share or deploy publicly.
+
+Roster: P1 (hands) is always **Mario**, P2 (phone/keyboard) always **Luigi**; the AI field is
+**Peach**, **Yoshi**, **Toad** and **Bowser**, each on their own kart kind (standard, slim,
+royal, buggy, mini, heavy).
+
+- Roster, colours and GLB fit values: `src/game/characters/registry.ts`. Optional GLB
+  loading: `src/game/characters/CharacterLoader.ts`.
+- Procedural drivers: `src/game/render/CharacterBuilder.ts`. Karts:
+  `src/game/render/KartBuilder.ts`.
+- Both render cel-shaded (`src/game/render/ToonMaterials.ts`) with soft inverted-hull outlines
+  (`src/game/render/Outline.ts`; `setOutlinesEnabled(false)` turns them off for Low quality).
+  A dropped-in GLB keeps its own materials and gets no outline.
+- `npx tsx --test scripts/characters.test.ts` checks the triangle/draw-call budget and the
+  animation hooks.
 
 ## Deployment paths (phone connectivity + tilt steering)
 
@@ -131,27 +165,17 @@ The QR code and room code now encode the tunnel URL instead of the LAN IP — an
 any network can join, no certificate installation needed.
 
 
-### Graphics and items
+### Track, boosts and tests
 
-Rainbow Ridge now uses a SNES-inspired jewel-tile road and twinkling star accents,
-with a 1.73km layout: climbing slalom, 32m summit horseshoe, descending
-switchback, low final bend and five boost pads. The start grid remains level. The countryside
-has instanced wildflower verges. Procedural drivers have smoother silhouettes,
-coloured irises and catchlights, plus steering and boost body movement.
+One circuit: **Capricorn Coast** (~1.1km, 3 laps) — esplanade start, a banked climb onto
+the basalt headland, the harbour breakwater with three boost pads, a banked hairpin, a jump
+over the cane-train rail cutting, and a dirt shortcut through the cane that only pays off
+with a boost. There are no items: speed comes from drift-release mini-turbos, the boost
+pads, and the BOOST input (thumbs-up flick, Space / Enter, or the phone's BOOST button),
+rate-limited by the kart itself.
 
-Question-mark boxes tumble and burst into coloured shards when collected. Banana
-peels and segmented shells replace the old placeholder shapes. Item use emits a
-short spark burst; existing exhaust flames, shell trails and throw arcs remain.
-
-The roulette now includes **Golden Mushroom** (one sustained 4.5-second boost)
-and **Triple Bananas** (three peels tossed in a fan behind the kart). The existing
-three-banana limit per racer still applies. Both work for human and AI racers.
-
-Run `node --import tsx --test scripts/items.test.ts` for item behavior and geometry
-checks. Run `node --import tsx --test scripts/rainbow.test.ts` for track geometry
-and three-lap AI simulations. Preview each map with `?mode=single&map=rainbow` or
-`?mode=single&map=circuit` on the dev server.
-
+Run `npx tsx --test scripts/track.test.ts` for track geometry, the jump, the shortcut
+(corridor union, lap accounting, junction seams) and three-lap AI simulations.
 
 ### Railway controller QR codes
 

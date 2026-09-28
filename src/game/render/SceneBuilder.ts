@@ -1,47 +1,58 @@
 import * as THREE from 'three';
-import type { MapStyle } from '../track/maps';
 import { clamp, damp } from '../../shared/mathUtils';
 import { TUNING } from '../tuning';
 import type { KartState } from '../physics/Kart';
 import type { CharacterDef } from '../characters/registry';
-import { SPIN_OUT_SECONDS } from '../items/ItemSystem';
 import { buildKartChassis, disposeChassis, type KartChassis } from './KartBuilder';
-import { armPivotOf, buildCharacterModel } from './CharacterBuilder';
+import { animateDriver, buildCharacterModel, driverRigOf, type DriverRig } from './CharacterBuilder';
+import { disposeGeometries, retint } from './PartAssembler';
 
 export interface KartVisual {
   group: THREE.Group; // body+wheels+driverAnchor; position/rotation driven by physics
-  // §v3 Track B: was a single BoxGeometry Mesh, now the composed chassis Group
-  // (KartBuilder emits ~6 merged meshes, one per colour). Still exactly the
-  // node that takes the drift-lean roll and parents driverAnchor — that
-  // contract is what makes the driver lean into drifts for free.
+  // §v3 Track B: the composed chassis Group (one merged toon mesh + the
+  // steering wheel). Still exactly the node that takes the drift-lean roll
+  // and parents driverAnchor — that contract is what makes the driver lean
+  // into drifts for free. (group.rotation.z is main.ts's track-bank roll;
+  // nothing in here writes it.)
   body: THREE.Group;
   frontWheelPivots: THREE.Group[]; // steer-yawed independently of body lean
   leanAngle: number; // smoothed drift-lean state, mutated by updateKartVisual
   pitchAngle: number; // §Phase 5 item 5: smoothed slope-pitch state, mutated by updateKartVisual
-  // §Phase 3: seat anchor for the driver (GLTF model or procedural fallback).
-  // Parented under `body` (not `group`) so it inherits the existing drift-lean
+  // §Phase 3: seat anchor for the driver (procedural, or a GLB model once one
+  // loads). Parented under `body` (not `group`) so it inherits the drift-lean
   // roll (visual.body.rotation.z, set in updateKartVisual) for free — the
-  // driver leans into drifts along with the kart body with no extra per-frame code.
+  // driver leans into drifts along with the kart body with no extra code.
   driverAnchor: THREE.Group;
-  // §v3 Track B item 4: the chassis' steering wheel and the procedural
-  // driver's arm-roll group, both turned by steerActual in updateKartVisual.
-  // `armPivot` is null whenever a GLB driver is mounted (no such node in an
-  // imported model) — the steering wheel belongs to the kart, so it survives.
+  // §v3 Track B item 4: the chassis' steering wheel, turned by steerActual.
   steeringWheel?: THREE.Object3D;
-  armPivot: THREE.Object3D | null;
-  // Every material carrying the kart colour. setKartColor walks this instead
-  // of poking one mesh's material, and the instances are per-kart so tinting
-  // one kart can never repaint another (§v3 Track B item 4).
-  tintMaterials: THREE.MeshLambertMaterial[];
+  // The procedural driver's arm-roll rig (CharacterBuilder.animateDriver).
+  // Null whenever a GLB driver is mounted (no such node in an imported
+  // model) — the steering wheel belongs to the kart, so it keeps turning.
+  rig: DriverRig | null;
   // Kept so setKartCharacter can dispose the outgoing chassis when a player
-  // re-picks: each character drives *their* kart, not just their colour.
+  // re-picks, and read every frame for the wheel spinners/radii and the boost
+  // flare's tail/exhaust positions. setKartColor retints chassis.tint
+  // (this kart's own colour-attribute runs — the toon material is shared).
   chassis: KartChassis;
-  // §v3 Track C2: seconds left on the mushroom squash-and-stretch pop. Set by
-  // triggerBoostPop when an item boost fires and decayed by updateKartVisual
-  // in the render loop (never on the physics tick) — it drives `group.scale`,
-  // which nothing else writes, so it composes with the existing lean (body
-  // roll), pitch (group rotation.x) and steer visuals rather than fighting them.
+  // §v3 Track C2: seconds left on the boost squash-and-stretch pop. Set by
+  // triggerBoostPop when a manual boost fires and decayed by updateKartVisual
+  // in the render loop (never on the physics tick) — it drives `group.scale`
+  // together with the jump squash below, and nothing else writes that scale,
+  // so it composes with the lean (body roll), pitch (group rotation.x) and
+  // steer visuals rather than fighting them.
   boostPopTimer: number;
+  // §v5 jump squash-and-stretch (triggerSquash): seconds since the last
+  // trigger (>= SQUASH_SECONDS means idle) and its signed amplitude (+ =
+  // stretch tall, - = squash flat).
+  squashTime: number;
+  squashAmp: number;
+  // §v5: accumulated wheel roll angles per axle (rad, wrapped to one turn —
+  // the rear tyres are bigger so they turn slower).
+  wheelSpinFront: number;
+  wheelSpinRear: number;
+  // True while group.scale holds a non-identity value, so the frame the last
+  // effect ends writes exactly (1,1,1) once and later frames skip the write.
+  scaleDirty: boolean;
 }
 
 // §Phase 4 item 2: the ground plane moved to render/Environment.ts
@@ -56,23 +67,21 @@ export interface Lights {
 // shadow target is currently following (see updateLightTarget) — kept
 // constant every frame so the light always views the target from the same
 // angle, just from a re-centered position.
-export const SHADOW_LIGHT_OFFSET = new THREE.Vector3(40, 70, 30);
+// §v5 golden hour: a low sun (~27° up) over the land (+x), setting behind the
+// cane country, so shadows stretch long toward the sea. Environment.ts puts
+// the sky's sun disc and the ocean's glints on this same direction.
+export const SHADOW_LIGHT_OFFSET = new THREE.Vector3(58, 40, 46);
 const SHADOW_HALF_SIZE = 40; // ~80x80m ortho shadow camera, the solo/default extent (§Phase 4 item 3)
 const SHADOW_HALF_SIZE_MAX = 90; // widest the ortho box is allowed to grow to cover a spread-out split-screen pair (§Phase 4 finding #3)
 
-// §v4: `style` picks the lighting rig. The space map is lit far more coolly
-// and from a dimmer key, so the rainbow ribbon (which carries its own colour
-// and a small emissive floor) is the brightest thing on screen rather than
-// competing with a daylight sun. The shadow rig itself is identical in both —
-// the karts still cast onto the road.
-export function buildLights(scene: THREE.Scene, style: MapStyle = 'meadow'): Lights {
-  const space = style === 'space';
-  scene.add(
-    space
-      ? new THREE.HemisphereLight(0x8899ff, 0x2a1245, 0.85)
-      : new THREE.HemisphereLight(0xbfe3ff, 0x4a6b3a, 1.2),
-  );
-  const dir = space ? new THREE.DirectionalLight(0xdfe6ff, 0.75) : new THREE.DirectionalLight(0xfff3d6, 0.9);
+// §v5 golden hour (the v4 'space' rig is gone with its map): a warm key sun
+// plus a sky/sand HemisphereLight fill. On toon materials the key is what gets
+// stepped into bands; the hemisphere fill is smooth and is what keeps the
+// shadow side warm and readable instead of flat. PCFSoft shadows (set on the
+// renderer in main.ts), one shadow update per frame.
+export function buildLights(scene: THREE.Scene): Lights {
+  scene.add(new THREE.HemisphereLight(0x9fd8f2, 0xf0c890, 1.25));
+  const dir = new THREE.DirectionalLight(0xffc98a, 2.1);
   dir.castShadow = true;
   dir.shadow.mapSize.set(TUNING.shadowMapSize, TUNING.shadowMapSize);
   dir.shadow.camera.left = -SHADOW_HALF_SIZE;
@@ -82,6 +91,7 @@ export function buildLights(scene: THREE.Scene, style: MapStyle = 'meadow'): Lig
   dir.shadow.camera.near = 10;
   dir.shadow.camera.far = 180;
   dir.shadow.bias = -0.0015; // avoids shadow acne on the flat road/ground planes
+  dir.shadow.normalBias = 0.03; // §v5: the low sun grazes banked tarmac at a shallow angle
   dir.position.copy(SHADOW_LIGHT_OFFSET);
   scene.add(dir);
   scene.add(dir.target);
@@ -122,8 +132,8 @@ export function updateShadowBounds(lights: Lights, playerDistance: number) {
 // Kart's local "nose" points toward +Z (matches physics/Kart.ts kartForward()).
 // §Phase 3: takes a CharacterDef instead of a bare color — the kart body is
 // tinted from `def.kartColor` and the seat starts populated with `def`'s
-// procedural fallback driver (setDriver swaps in the real GLTF model later,
-// once/if it loads).
+// procedural driver (setDriver swaps in the real GLB model later, once/if it
+// loads — see characters/CharacterLoader.ts and main.ts's loadDriverFor).
 export function buildKart(def: CharacterDef): KartVisual {
   const group = new THREE.Group();
   // §Phase 5 elevation review fix #1: default Euler order 'XYZ' couples
@@ -142,9 +152,9 @@ export function buildKart(def: CharacterDef): KartVisual {
   const chassis = buildKartChassis(def);
   mountChassis(group, chassis, driverAnchor);
 
-  // §Phase 4 item 3: no more flat blob shadow mesh — real shadow maps replace
-  // it (buildLights/updateLightTarget); every chassis/wheel/driver mesh sets
-  // castShadow at construction (PartAssembler) or in setDriver's traversal.
+  // §Phase 4 item 3: no blob shadow mesh — real shadow maps (buildLights/
+  // updateLightTarget); every chassis/wheel/driver mesh sets castShadow at
+  // construction (PartAssembler). Outline hulls never cast (Outline.ts).
   const visual: KartVisual = {
     group,
     body: chassis.body,
@@ -153,12 +163,16 @@ export function buildKart(def: CharacterDef): KartVisual {
     pitchAngle: 0,
     driverAnchor,
     steeringWheel: chassis.steeringWheel,
-    armPivot: null,
-    tintMaterials: chassis.tintMaterials,
+    rig: null,
     chassis,
     boostPopTimer: 0,
+    squashTime: SQUASH_SECONDS,
+    squashAmp: 0,
+    wheelSpinFront: 0,
+    wheelSpinRear: 0,
+    scaleDirty: false,
   };
-  setDriver(visual, def, null); // seed the procedural driver immediately; caller swaps in the real model once loaded
+  setDriver(visual, def, null); // seed the procedural driver immediately; the caller swaps in a GLB once loaded
   return visual;
 }
 
@@ -177,11 +191,11 @@ function mountChassis(group: THREE.Group, chassis: KartChassis, driverAnchor: TH
 }
 
 // §v3 Track B: swaps the whole chassis for `def`'s kart kind (Bowser's wide
-// twin-exhaust heavy, Peach's royal, Toad's mini...) and retints it. Called
-// when a player picks a different character; the driver currently mounted on
+// twin-exhaust heavy, Peach's royal, Toad's mini...) in its colours. Called
+// when an entity changes character; the driver currently mounted on
 // driverAnchor is carried across untouched (the caller re-mounts it right
-// afterwards via setDriver, but detaching first means an in-flight GLB model
-// is never caught by disposeChassis' traversal).
+// afterwards via setDriver) — detaching the anchor first means an in-flight
+// GLB model is never caught by disposeChassis' traversal.
 export function setKartCharacter(visual: KartVisual, def: CharacterDef) {
   const outgoing = visual.chassis;
   visual.driverAnchor.removeFromParent();
@@ -196,68 +210,56 @@ export function setKartCharacter(visual: KartVisual, def: CharacterDef) {
   visual.body = chassis.body;
   visual.frontWheelPivots = chassis.frontWheelPivots;
   visual.steeringWheel = chassis.steeringWheel;
-  visual.tintMaterials = chassis.tintMaterials;
   // The new body starts level; the smoothed lean/pitch state carries over so
   // re-picking mid-drift doesn't pop.
   visual.body.rotation.z = visual.leanAngle;
-
 }
 
 // §Phase 3: sets (or clears) the driver mounted on `visual.driverAnchor` — the
 // scaled/offset/rotated GLTF scene when `model` is provided, otherwise the
 // procedural character built from `def.driver` (§v3 Track B). Safe to call
 // repeatedly (e.g. on character re-select, or when a model finishes loading
-// after the fallback was already showing): always clears whatever was mounted first.
-export function setDriver(visual: KartVisual, def: CharacterDef, model: THREE.Object3D | null) {
+// after the procedural driver was already showing): always clears whatever
+// was mounted first.
+export function setDriver(visual: KartVisual, def: CharacterDef, model: THREE.Object3D | null = null) {
   const anchor = visual.driverAnchor;
   while (anchor.children.length > 0) {
     const child = anchor.children[0];
     anchor.remove(child);
-    // Only dispose procedural-fallback meshes (tagged below): GLTF-sourced
-    // children share geometry/material with the cached original via
-    // clone(true), so disposing those would corrupt every other kart using
-    // the same cached model.
-    if (child.userData.disposable) {
-      child.traverse((obj) => {
-        if (obj instanceof THREE.Mesh) {
-          obj.geometry.dispose();
-          if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
-          else obj.material.dispose();
-        }
-      });
-    }
+    // Only procedural drivers (tagged userData.disposable) are freed, and
+    // only their geometry: their materials are the shared toon/outline
+    // caches. GLTF-sourced children share geometry AND materials with the
+    // cached original via clone(true), so disposing those would corrupt
+    // every other kart using the same cached model.
+    if (child.userData.disposable) disposeGeometries(child);
   }
 
   if (model) {
     model.scale.setScalar(def.scale);
     model.position.set(0, def.yOffset, 0);
     model.rotation.y = def.rotationY;
+    // A GLB keeps its own (PBR) materials and gets no baked outline: it can
+    // be skinned/morphed and its geometry is shared with the loader cache.
+    model.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) obj.castShadow = true;
+    });
     anchor.add(model);
-    // A GLB has no arm-roll node to drive, so the per-frame arm animation
-    // simply switches off for it (the kart's steering wheel keeps turning).
-    visual.armPivot = null;
+    // No arm-roll node in an imported model: the per-frame arm animation
+    // switches off for it (the kart's steering wheel keeps turning).
+    visual.rig = null;
   } else {
     const driver = buildCharacterModel(def);
     anchor.add(driver);
-    visual.armPivot = armPivotOf(driver);
+    visual.rig = driverRigOf(driver);
   }
-
-  // §Phase 4 item 3: drivers cast shadows too, whichever branch mounted them —
-  // set here (rather than once in buildKart) since setDriver re-mounts on
-  // every character reselect and every async GLTF-model swap-in.
-  anchor.traverse((obj) => {
-    if (obj instanceof THREE.Mesh) obj.castShadow = true;
-  });
 }
 
-// §v3 Track B item 4: retints the WHOLE chassis, not one body mesh — the kart
-// is now ~6 merged meshes and several of them carry the kart colour. The
-// materials in tintMaterials are per-kart instances (PartAssembler never
-// shares one between karts), so tinting here can only ever repaint this kart.
-// Used when a player swaps characters so the colour updates immediately
-// without rebuilding the KartVisual (setKartCharacter does the full rebuild).
+// §v3 Track B item 4: retints the WHOLE chassis (and its outline hull) in
+// place, by rewriting this kart's own colour-attribute runs (chassis.tint)
+// rather than a material colour — the toon material is shared by every kart,
+// the colour buffers are not, so this can only ever repaint this one kart.
 export function setKartColor(visual: KartVisual, color: number) {
-  for (const mat of visual.tintMaterials) mat.color.setHex(color);
+  retint(visual.chassis.tint, color);
 }
 
 const LEAN_BLEND_RATE = 1 / 0.15; // blend the drift lean in/out over ~0.15s
@@ -268,39 +270,47 @@ const FRONT_WHEEL_YAW_SCALE = 0.4;
 // rotation.z reads as clockwise *to them* while positive steer points the
 // front wheels toward the kart's +X (its left).
 const STEER_WHEEL_SCALE = -0.7;
-const STEER_ARM_SCALE = -0.22; // the arms only need a hint of the same roll
 
-// §v3 Track C2 spin-out visual. `stepKart` already yaws `kart.heading` at 10
-// rad/s while spun out; this adds exactly SPIN_VISUAL_TURNS more revolutions
-// *on top of it, visually only*, so getting shelled reads as a proper tumble
-// at split-screen size instead of a slow pirouette.
-//
-// It is a closed form of the elapsed spin fraction rather than an accumulator
-// on purpose. extra(u) = TURNS * 2PI * u * (2 - u) with u = elapsed/duration:
-//  - extra(0) = 0                      -> nothing pops when the spin starts,
-//  - d(extra)/dt is proportional to (1 - u), i.e. to the REMAINING spin time
-//    (the spec's wording) -> it eases out instead of stopping dead,
-//  - extra(1) = TURNS * 2PI, an exact whole number of turns -> the moment
-//    spinTimer hits 0 and this term drops away, the kart is already facing
-//    where the term left it, so there is no pop on the way out either.
-// Storing an accumulator instead would end on an arbitrary angle and have to
-// unwind visibly (i.e. spin the kart backwards) to get back to zero.
-const SPIN_VISUAL_TURNS = 1;
-
-// Mushroom pop (§v3 Track C2): a brief stretch along the kart's own +Z (its
+// Boost pop (§v3 Track C2): a brief stretch along the kart's own +Z (its
 // nose) with a matching squash in X/Y, easing back to 1 over BOOST_POP_SECONDS.
-// Applied to `group.scale`, which is otherwise untouched.
+// Applied to `group.scale`, together with the jump squash below.
 const BOOST_POP_SECONDS = 0.28;
 const BOOST_POP_STRETCH_Z = 0.26;
 const BOOST_POP_SQUASH_X = 0.16;
 const BOOST_POP_SQUASH_Y = 0.1;
 
-// §v3 Track C2: called by main.ts the moment a mushroom is actually fired (not
-// on every boost — a drift-release boost is already sold by the drift sparks,
-// and popping the kart on every tier-1 release would be constant noise).
-// Idempotent: re-firing mid-pop just restarts the timer.
+// §v3 Track C2 / §v5: called by main.ts the moment a manual BOOST actually
+// fires (not on every boost — a drift-release boost is already sold by the
+// drift sparks, a pad by the pad). Idempotent: re-firing mid-pop just
+// restarts the timer.
 export function triggerBoostPop(visual: KartVisual) {
   visual.boostPopTimer = BOOST_POP_SECONDS;
+}
+
+// §v5 jump squash-and-stretch. A damped spring in closed form:
+//   s(t) = amp * ramp(t) * e^(-DECAY t) * cos(OMEGA t) * (1 - t/SECONDS)
+// applied as y *= 1 + s and x,z *= 1 - s/2 (roughly volume-preserving),
+// about the group origin — the tyre contact patch — so the kart squashes
+// down onto the road instead of shrinking toward its middle. Closed form
+// rather than an integrated spring because a render dt of up to 0.1s (see
+// main.ts renderDt clamp) would blow up an explicit integrator at this
+// stiffness. The (1 - t/SECONDS) factor lands it on exactly 0 at the end, and
+// the 30ms ramp keeps the first frame from snapping. One overshoot, done in
+// ~0.28s: takeoff stretches tall and then briefly flattens; landing squashes
+// flat and then briefly springs tall.
+export const SQUASH_SECONDS = 0.28;
+const SQUASH_OMEGA = Math.PI * 2 * 3.2;
+const SQUASH_DECAY = 6;
+const SQUASH_RAMP = 0.03;
+const SQUASH_TAKEOFF = 0.2;
+const SQUASH_LAND = -0.3;
+
+// Called by the jump code: 'takeoff' the tick the kart leaves the ground,
+// 'land' the tick it touches down. `strength` (clamped 0..2) scales the
+// amplitude, e.g. by landing speed; 1 is a normal jump. Restarts mid-spring.
+export function triggerSquash(visual: KartVisual, kind: 'takeoff' | 'land', strength = 1) {
+  visual.squashTime = 0;
+  visual.squashAmp = (kind === 'takeoff' ? SQUASH_TAKEOFF : SQUASH_LAND) * clamp(strength, 0, 2);
 }
 
 // Sets kart visuals from physics state each render frame (§3.2 closing paragraph):
@@ -313,27 +323,39 @@ export function triggerBoostPop(visual: KartVisual) {
 export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number, grade = 0) {
   visual.group.position.copy(kart.pos);
 
-  // §v3 Track C2: the spin-out tumble is added here, to the *visual* yaw only —
-  // kart.heading is read, never written, so physics is untouched (the kart
-  // still travels exactly where stepKart's spin-out branch sends it).
-  let yaw = kart.heading;
-  if (kart.spinTimer > 0) {
-    const u = clamp(1 - kart.spinTimer / SPIN_OUT_SECONDS, 0, 1); // 0 at the hit -> 1 as control returns
-    yaw += SPIN_VISUAL_TURNS * Math.PI * 2 * u * (2 - u);
-  }
-  visual.group.rotation.y = yaw;
+  visual.group.rotation.y = kart.heading;
 
-  // §v3 Track C2: mushroom squash-and-stretch. The timer reaches exactly 0 on
-  // its last frame, which makes the scale exactly (1,1,1) again, so the guard
-  // below can skip the write entirely from the next frame on.
+  // group.scale = boost pop x jump squash. Written only while either is
+  // running, plus exactly once more (scaleDirty) to land on (1,1,1).
+  let sx = 1;
+  let sy = 1;
+  let sz = 1;
+  let scaling = false;
   if (visual.boostPopTimer > 0) {
     visual.boostPopTimer = Math.max(0, visual.boostPopTimer - dt);
     const ease = (visual.boostPopTimer / BOOST_POP_SECONDS) ** 2;
-    visual.group.scale.set(
-      1 - BOOST_POP_SQUASH_X * ease,
-      1 - BOOST_POP_SQUASH_Y * ease,
-      1 + BOOST_POP_STRETCH_Z * ease,
-    );
+    sx *= 1 - BOOST_POP_SQUASH_X * ease;
+    sy *= 1 - BOOST_POP_SQUASH_Y * ease;
+    sz *= 1 + BOOST_POP_STRETCH_Z * ease;
+    scaling = true;
+  }
+  if (visual.squashTime < SQUASH_SECONDS) {
+    visual.squashTime = Math.min(SQUASH_SECONDS, visual.squashTime + dt);
+    const t = visual.squashTime;
+    const s =
+      visual.squashAmp *
+      Math.min(1, t / SQUASH_RAMP) *
+      Math.exp(-SQUASH_DECAY * t) *
+      Math.cos(SQUASH_OMEGA * t) *
+      (1 - t / SQUASH_SECONDS);
+    sy *= 1 + s;
+    sx *= 1 - s * 0.5;
+    sz *= 1 - s * 0.5;
+    scaling = true;
+  }
+  if (scaling || visual.scaleDirty) {
+    visual.group.scale.set(sx, sy, sz);
+    visual.scaleDirty = scaling;
   }
 
   // §v3 polish: 0.25 -> 0.21 rad, matching the eased driftYawBonus/lateral
@@ -352,74 +374,19 @@ export function updateKartVisual(visual: KartVisual, kart: KartState, dt: number
     pivot.rotation.y = kart.steerActual * FRONT_WHEEL_YAW_SCALE;
   }
 
-  // §v3 Track B item 4: the steering wheel (and, when a procedural driver is
-  // mounted, their arms) follow the steering input. Two scalar writes, no
-  // allocation, no traversal — updateKartVisual runs for all six karts every
-  // frame and must stay allocation-free.
+  // §v5: wheels roll with speed (angle = distance / radius, per axle since the
+  // rear tyres are bigger). Wrapped to one turn so the float never grows.
+  const chassis = visual.chassis;
+  const travel = kart.speed * dt;
+  visual.wheelSpinFront = (visual.wheelSpinFront + travel / chassis.frontR) % (Math.PI * 2);
+  visual.wheelSpinRear = (visual.wheelSpinRear + travel / chassis.rearR) % (Math.PI * 2);
+  for (const spinner of chassis.frontWheelSpinners) spinner.rotation.x = visual.wheelSpinFront;
+  for (const axle of chassis.rearWheels) axle.rotation.x = visual.wheelSpinRear;
+
+  // §v3 Track B item 4 / §v5: the steering wheel follows the input, and the
+  // procedural driver's arms follow the wheel (a GLB driver has no rig).
+  // Scalar writes only, no allocation, no traversal —
+  // updateKartVisual runs for all six karts every frame.
   if (visual.steeringWheel) visual.steeringWheel.rotation.z = kart.steerActual * STEER_WHEEL_SCALE;
-  if (visual.armPivot) visual.armPivot.rotation.z = kart.steerActual * STEER_ARM_SCALE;
-}
-
-// §Phase 10 item visuals -----------------------------------------------------
-
-// Rotating vertex-colored cube; caller toggles .visible with box.active.
-// §v3 Track C2: the material is `transparent` now so the render loop can fade
-// the cube out on pickup (scale-up + fade) and scale it back in on respawn.
-// The ItemSystem state machine (box.active/respawnTimer) is unchanged — main.ts
-// derives the animation purely from watching `active` flip.
-export function buildItemBoxMesh(): THREE.Mesh {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 128;
-  const ctx = canvas.getContext('2d')!;
-  const gradient = ctx.createLinearGradient(0, 0, 128, 128);
-  gradient.addColorStop(0, '#7affed'); gradient.addColorStop(0.45, '#a6a0ff'); gradient.addColorStop(1, '#ffb8ef');
-  ctx.fillStyle = gradient; ctx.fillRect(0, 0, 128, 128);
-  ctx.strokeStyle = '#f1ffff'; ctx.lineWidth = 7; ctx.strokeRect(5, 5, 118, 118);
-  ctx.font = 'bold 94px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.lineWidth = 8; ctx.strokeStyle = '#4c358e'; ctx.strokeText('?', 64, 69);
-  ctx.fillStyle = '#ffffff'; ctx.fillText('?', 64, 69);
-  const map = new THREE.CanvasTexture(canvas); map.colorSpace = THREE.SRGBColorSpace;
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1),
-    new THREE.MeshLambertMaterial({ map, emissiveMap: map, emissive: 0xffffff, emissiveIntensity: 0.3, transparent: true }));
-  mesh.position.y = 0.9;
-  return mesh;
-}
-
-export function buildBananaMesh(): THREE.Mesh {
-  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.14, 0.48, 10),
-    new THREE.MeshLambertMaterial({ color: 0xffda34 }));
-  for (let i = 0; i < 3; i++) {
-    const a = i * Math.PI * 2 / 3;
-    const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(0, 0.14, 0),
-      new THREE.Vector3(Math.cos(a) * 0.24, -0.34, Math.sin(a) * 0.24),
-      new THREE.Vector3(Math.cos(a) * 0.55, -0.13, Math.sin(a) * 0.55));
-    mesh.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 10, 0.085, 6, false),
-      new THREE.MeshLambertMaterial({ color: 0xffe34e })));
-  }
-  for (const x of [-0.042, 0.042]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.023, 8, 6), new THREE.MeshBasicMaterial({ color: 0x30251c }));
-    eye.position.set(x, 0.06, 0.105); eye.scale.y = 1.7; mesh.add(eye);
-  }
-  const stalk = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.065, 0.12, 8), new THREE.MeshLambertMaterial({ color: 0x866329 }));
-  stalk.position.y = 0.27; mesh.add(stalk);
-  return mesh;
-}
-
-export function buildShellMesh(): THREE.Mesh {
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.38, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2),
-    new THREE.MeshLambertMaterial({ color: 0x27c765 }));
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.35, 0.075, 8, 24), new THREE.MeshLambertMaterial({ color: 0xfff3cd }));
-  rim.rotation.x = Math.PI / 2; mesh.add(rim);
-  const underside = new THREE.Mesh(new THREE.CircleGeometry(0.35, 24), new THREE.MeshLambertMaterial({ color: 0x8b6332, side: THREE.DoubleSide }));
-  underside.rotation.x = Math.PI / 2; mesh.add(underside);
-  for (let i = 0; i < 6; i++) {
-    const a = i * Math.PI / 3;
-    const points: THREE.Vector3[] = [];
-    for (let j = 0; j <= 8; j++) {
-      const t = j / 8 * Math.PI / 2;
-      points.push(new THREE.Vector3(Math.sin(t) * Math.cos(a) * 0.384, Math.cos(t) * 0.384, Math.sin(t) * Math.sin(a) * 0.384));
-    }
-    mesh.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 8, 0.012, 4, false), new THREE.MeshLambertMaterial({ color: 0x14673b })));
-  }
-  return mesh;
+  if (visual.rig) animateDriver(visual.rig, kart.steerActual);
 }

@@ -4,13 +4,23 @@ import {
   type ControllerToServer,
   type EventName,
   type PlayerSlot,
-  type RosterPick,
   type SteerMode,
 } from '../shared/protocol';
+import { resolveRelayUrl } from '../shared/relayUrl';
 
 const CODE_STORAGE_KEY = 'kart.controller.roomCode';
-const SLOT_STORAGE_KEY = 'kart.controller.slot';
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000];
+
+// §stage2: the controller page can be hosted separately from the relay (e.g.
+// Vercel static page + Railway relay) — VITE_RELAY_URL is the URL to use in
+// that case, accepted in any of the shapes shared/relayUrl.ts normalizes
+// (wss://host, wss://host/ws, https://host, http://host, or a bare host).
+// Falls back to same-origin `/ws` exactly as before when it isn't set (LAN /
+// single-host dev).
+function relayUrl(): string {
+  const configured = import.meta.env.VITE_RELAY_URL as string | undefined;
+  return resolveRelayUrl(configured, { protocol: location.protocol, host: location.host });
+}
 const MISSED_PONG_LIMIT = 2;
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting';
@@ -21,7 +31,7 @@ export interface ControllerInput {
   throttle: 0 | 1;
   brake: 0 | 1;
   drift: 0 | 1;
-  item: 0 | 1;
+  boost: 0 | 1;
   steerMode: SteerMode;
 }
 
@@ -31,7 +41,6 @@ export interface ControllerSocketCallbacks {
   onJoinError?: (reason: JoinErrorReason) => void;
   onGameLeft?: () => void;
   onEvent?: (name: EventName) => void;
-  onRoster?: (picks: RosterPick[]) => void;
   onRtt?: (rttMs: number) => void;
 }
 
@@ -46,6 +55,12 @@ export class ControllerSocket {
   private missedPongs = 0;
   private seq = 0;
   private getInput: () => ControllerInput;
+  // Set once the server has rejected a join (bad-room / room-full): the
+  // socket is closed and must NOT reconnect on its own — otherwise it kept
+  // silently retrying the same bad code in the background while the code
+  // entry panel asked the user to re-enter one, and a second live socket
+  // ended up open once they did (see the close handler below).
+  private stoppedAfterJoinError = false;
   slot: PlayerSlot | null = null;
 
   constructor(
@@ -59,15 +74,12 @@ export class ControllerSocket {
 
   private connect() {
     this.callbacks.onStatus?.(this.reconnectAttempt === 0 ? 'connecting' : 'reconnecting');
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const ws = new WebSocket(relayUrl());
     this.ws = ws;
 
     ws.addEventListener('open', () => {
       this.missedPongs = 0;
-      const storedSlot = sessionStorage.getItem(SLOT_STORAGE_KEY);
-      const wantSlot = storedSlot !== null ? (Number(storedSlot) as PlayerSlot) : undefined;
-      this.sendRaw({ type: 'hello', role: 'controller', code: this.code, wantSlot });
+      this.sendRaw({ type: 'hello', role: 'controller', code: this.code });
     });
 
     ws.addEventListener('message', (ev) => {
@@ -78,23 +90,21 @@ export class ControllerSocket {
           this.reconnectAttempt = 0;
           this.slot = msg.slot;
           sessionStorage.setItem(CODE_STORAGE_KEY, this.code);
-          sessionStorage.setItem(SLOT_STORAGE_KEY, String(msg.slot));
           this.callbacks.onStatus?.('connected');
           this.callbacks.onJoined?.(msg.slot);
           this.startSending();
           this.startHeartbeat();
           break;
         case 'error':
+          this.stoppedAfterJoinError = true;
           this.callbacks.onJoinError?.(msg.reason);
+          ws.close();
           break;
         case 'peer':
           if (msg.event === 'game-left') this.callbacks.onGameLeft?.();
           break;
         case 'event':
           this.callbacks.onEvent?.(msg.name);
-          break;
-        case 'roster':
-          this.callbacks.onRoster?.(msg.picks);
           break;
         case 'pong': {
           const sentAt = this.pendingPings.get(msg.t);
@@ -111,6 +121,7 @@ export class ControllerSocket {
     ws.addEventListener('close', () => {
       this.stopSending();
       this.stopHeartbeat();
+      if (this.stoppedAfterJoinError) return;
       this.callbacks.onStatus?.('reconnecting');
       this.scheduleReconnect();
     });
@@ -136,7 +147,7 @@ export class ControllerSocket {
         throttle: input.throttle,
         brake: input.brake,
         drift: input.drift,
-        item: input.item,
+        boost: input.boost,
         steerMode: input.steerMode,
       });
     }, SEND_INTERVAL_MS);
@@ -170,10 +181,6 @@ export class ControllerSocket {
 
   sendEvent(name: EventName) {
     this.sendRaw({ type: 'event', name });
-  }
-
-  sendSelect(characterId: string) {
-    this.sendRaw({ type: 'select', characterId });
   }
 
   private sendRaw(msg: ControllerToServer) {
