@@ -13,3 +13,5 @@ public/assets/**
 # scripts/copy-mediapipe.mjs on predev/prebuild. The hand_landmarker.task model
 # next to it IS tracked (it isn't in any npm package).
 public/mediapipe/wasm/
+.vercel
+.env*
